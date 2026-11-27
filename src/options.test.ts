@@ -8,7 +8,7 @@ describe("settle", () => {
     const settings = settle({});
     expect(settings).toMatchObject(DEFAULTS);
     expect(settings.colours).toEqual(PALETTES.amber);
-    expect(settings.count).toBeNull();
+    expect(settings.mood).toBe("busy");
     expect(settings.reducedMotion).toBeNull();
   });
 
@@ -28,14 +28,16 @@ describe("settle", () => {
   });
 
   it("holds numbers to their ranges, and ignores what isn't one", () => {
-    const settings = settle({ speed: -3, aperture: 99, focus: Number.NaN, pool: 1, maxPixels: 10 });
+    const settings = settle({ speed: -3, aperture: 99, focus: Number.NaN, place: 2, maxPixels: 10 });
     expect(settings.speed).toBe(0);
     expect(settings.aperture).toBe(3);
     expect(settings.focus).toBe(DEFAULTS.focus);
-    expect(settings.pool).toBe(0.4);
+    expect(settings.place).toBe(1);
     expect(settings.maxPixels).toBe(50_000);
     // @ts-expect-error A palette that isn't one falls back to the default.
     expect(settle({ palette: "plaid" }).palette).toBe("amber");
+    // @ts-expect-error A mood that isn't one keeps the one before.
+    expect(settle({ mood: "frantic" }, settle({ mood: "calm" })).mood).toBe("calm");
   });
 });
 

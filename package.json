@@ -1,14 +1,15 @@
 {
   "name": "@cesarvenzac/lava",
-  "version": "0.1.0",
-  "description": "A lava lamp for any box: thick 3D wax glowing in a dark liquid, drawing necks out of a pool on the bulb and parting slowly, shot through a long lens with a shallow focus, bloom and a filmic grade. One WebGL 2 render, seeded, no dependencies.",
+  "version": "0.2.0",
+  "description": "A lava lamp for any box, simulated: thousands of particles of wax in 3D rising, pressing together and sinking back at a real lamp's speeds, glowing in a dark liquid, shot through a long lens with a shallow focus, bloom and a filmic grade. WebGL 2 and a worker, no dependencies.",
   "keywords": [
     "lava",
     "lava-lamp",
-    "metaballs",
+    "simulation",
+    "sph",
+    "fluid",
     "blobs",
     "ray-marching",
-    "sdf",
     "depth-of-field",
     "bloom",
     "background",
@@ -46,6 +47,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "check": "sh check/run.sh",
+    "worker": "node scripts/worker.mjs",
+    "warm": "node --no-warnings scripts/warm.ts",
     "prepublishOnly": "npm run build"
   },
   "peerDependencies": {
@@ -59,6 +62,7 @@
   "devDependencies": {
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "esbuild": "^0.28.2",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "typescript": "^5.9.3",

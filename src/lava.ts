@@ -4,22 +4,25 @@
  *   import { lava } from "@cesarvenzac/lava";
  *
  *   const lamp = lava(document.querySelector(".hero"), { palette: "magenta" });
- *   lamp.set({ speed: 1.5 });
+ *   lamp.set({ mood: "calm" });
  *   lamp.destroy();
  *
- * The wax is drawn on a canvas laid under the element's own content, filling it. Until the first
+ * The lamp is simulated, its wax thousands of particles in 3D (sim.ts), in a worker so the page
+ * stays free; it starts from a lamp already running. Its wax is drawn on a canvas laid under the
+ * element's own content, filling it as a picture does with `object-fit: cover`: a box as tall as
+ * the lamp or taller shows all of it, a wider one a band, which `place` chooses. Until the first
  * frame is drawn (and where a browser can't draw it at all) the element shows the liquid lit from
- * below, as a CSS background, and the drawing fades in over it. It moves only while it's on
- * screen and the tab is shown, and holds still where the visitor's system asks for less motion.
- * Where it stands is the element's `data-lava`: "waiting" for its shaders, "drawing", or
+ * below, as a CSS background, and the drawing fades in over it. It runs only while it's on screen
+ * and the tab is shown, and holds still where the visitor's system asks for less motion. Where it
+ * stands is the element's `data-lava`: "waiting" for its shaders and its first field, "drawing", or
  * "unavailable" where the browser can't draw it.
  */
 
-import { type Look, type Readiness, rendererFor } from "./gl.ts";
-import { countFor, frameOf, place } from "./motion.ts";
+import { BOX, type Look, type Readiness, rendererFor, type View } from "./gl.ts";
+import type { Sent } from "./loop.ts";
 import { type LavaOptions, type Settings, settle } from "./options.ts";
 import { standInOf, toLinear } from "./palettes.ts";
-import { planOf } from "./plan.ts";
+import { runnerOf } from "./runner.ts";
 
 export type Lava = {
   /** The element it's drawn in. */
@@ -28,10 +31,10 @@ export type Lava = {
   set(options: LavaOptions): void;
   play(): void;
   pause(): void;
-  /** Moves to a moment, in seconds of its own motion, and draws it, paused or not. */
-  seek(time: number): void;
-  /** Seconds into its motion. */
+  /** Seconds of the lamp's own time so far. */
   readonly time: number;
+  /** How many of the lamp's seconds pass in a real one, lately: below `speed` where the device can't keep up. */
+  readonly rate: number;
   /** Whether it's drawing yet: until then, and if it never can, its stand-in shows. */
   readonly drawing: boolean;
   /** Takes it out of the element and gives back everything it changed there. */
@@ -68,11 +71,10 @@ function lookOf(settings: Settings, element: HTMLElement): Look {
     hot: linear(colours.hot),
     liquid: linear(colours.liquid),
     light: linear(colours.light),
-    pool: settings.pool,
-    wobble: settings.wobble,
     glow: settings.glow,
     gloss: settings.gloss,
     haze: settings.haze,
+    heat: settings.heat,
     aperture: settings.aperture,
     focus: settings.focus,
     bloom: settings.bloom,
@@ -87,12 +89,22 @@ const SLOW = 50;
 const LOWER = 0.78;
 const LOWEST = 2;
 
+/** What a box of this shape shows of the lamp: all its width, and as much of its height as fits, at `place`. */
+export function viewOf(aspect: number, place: number): View {
+  const lamp = BOX[0] / BOX[1];
+  if (aspect >= lamp) {
+    const height = BOX[0] / aspect;
+    return { x: 0, y: place * (BOX[1] - height), width: BOX[0], height };
+  }
+  const width = aspect * BOX[1];
+  return { x: (BOX[0] - width) / 2, y: 0, width, height: BOX[1] };
+}
+
 export function lava(element: HTMLElement, options: LavaOptions = {}): Lava {
   let settings = settle(options);
-  let plan = planOf(settings.seed);
-  let time = settings.start;
   let look = lookOf(settings, element);
-  const frame = frameOf();
+  let time = 0;
+  let rate = 0;
 
   // What it changes on the element, to give back.
   const was = {
@@ -167,36 +179,64 @@ export function lava(element: HTMLElement, options: LavaOptions = {}): Lava {
   const still = () => settings.reducedMotion ?? reduce?.matches ?? false;
   const moving = () => !destroyed && onScreen && !document.hidden && !settings.paused && !still();
 
-  function draw(readiness: Readiness) {
-    if (readiness !== "ready" || !size.width) return;
-    const aspect = size.width / size.height;
-    place(plan, time, { aspect, pool: settings.pool, size: settings.size, count: countFor(aspect, settings.count), pixel: 1 / size.sceneHeight }, frame);
-    renderer.draw(frame, look, time, frames);
+  // The fields: each into the slot the one before isn't in, the picture moving toward it over the
+  // time it took to come.
+  let fields = 0, newest: 0 | 1 = 1, arrived = 0, gap = 1 / 20;
+  const runner = runnerOf((sent: Sent) => {
+    if (destroyed) return;
+    const slot: 0 | 1 = newest === 0 ? 1 : 0;
+    renderer.upload(slot, sent.wax, sent.heat, sent.dims);
+    if (!fields) renderer.upload(newest, sent.wax, sent.heat, sent.dims);
+    const now = performance.now();
+    if (fields) gap = Math.max(0.02, Math.min(0.5, (now - arrived) / 1000));
+    arrived = now;
+    newest = slot;
+    fields++;
+    time = sent.time;
+    rate = sent.rate;
+    request();
+  });
+  let running = moving();
+  runner.start(settings.mood, settings.speed, running);
+  const follow = () => {
+    const now = moving();
+    if (now !== running) {
+      running = now;
+      runner.set({ running });
+    }
+  };
+
+  function draw(readiness: Readiness, now: number) {
+    if (readiness !== "ready" || !size.width || !fields) return false;
+    const toward = Math.min(1, (now - arrived) / 1000 / gap);
+    renderer.draw(viewOf(size.width / size.height, settings.place), look, now / 1000, frames, newest === 1 ? toward : 1 - toward);
     if (!shown) {
       shown = true;
       canvas.style.opacity = "1";
       element.dataset.lava = "drawing";
     }
+    return toward < 1;
   }
 
-  let pending = false;
   function tick(now: number) {
     raf = 0;
     if (destroyed) return;
+    follow();
     const readiness = renderer.poll();
     if (readiness === "unavailable") {
       element.dataset.lava = "unavailable";
+      runner.set({ running: (running = false) });
       return;
     }
-    if (readiness === "waiting") {
-      // The shaders are still being made: ask again next frame, which never waits.
+    if (readiness === "waiting" || !fields) {
+      // The shaders are still being made, or the first field hasn't come: ask again next frame,
+      // which never waits.
       raf = requestAnimationFrame(tick);
       return;
     }
-    if (moving()) {
+    if (running) {
       const dt = last ? Math.min((now - last) / 1000, 0.05) : 0;
       last = now;
-      time += dt * settings.speed;
       frames++;
       if (dt > 0) fps += (1 / dt - fps) * 0.04;
       // Drawn smaller, at most twice and only early on, if frames come slowly: never a change of
@@ -207,16 +247,15 @@ export function lava(element: HTMLElement, options: LavaOptions = {}): Lava {
         judged = 0;
         resize(true);
       }
-      draw(readiness);
+      draw(readiness, now);
       raf = requestAnimationFrame(tick);
     } else {
       last = 0;
-      if (pending) draw(readiness);
+      // Still, it draws only when asked or while a field comes in, blended in over a few frames.
+      if (draw(readiness, now)) raf = requestAnimationFrame(tick);
     }
-    pending = false;
   }
   function request() {
-    pending = true;
     if (!raf && !destroyed) raf = requestAnimationFrame(tick);
   }
 
@@ -238,12 +277,15 @@ export function lava(element: HTMLElement, options: LavaOptions = {}): Lava {
     if (destroyed) return;
     const before = settings;
     settings = settle(next, settings);
-    if (settings.seed !== before.seed) plan = planOf(settings.seed);
-    if (next.start !== undefined) time = settings.start;
     look = lookOf(settings, element);
     paintStandIn();
     if (labelled && settings.label !== before.label) element.setAttribute("aria-label", settings.label);
     if (settings.maxPixels !== before.maxPixels) resize(true);
+    if (settings.mood !== before.mood) {
+      // Another lamp: started from its own warm start.
+      running = moving();
+      runner.start(settings.mood, settings.speed, running);
+    } else if (settings.speed !== before.speed) runner.set({ speed: settings.speed });
     request();
   }
 
@@ -252,12 +294,11 @@ export function lava(element: HTMLElement, options: LavaOptions = {}): Lava {
     set,
     play: () => set({ paused: false }),
     pause: () => set({ paused: true }),
-    seek(to) {
-      if (Number.isFinite(to)) time = to;
-      request();
-    },
     get time() {
       return time;
+    },
+    get rate() {
+      return rate;
     },
     get drawing() {
       return shown;
@@ -270,6 +311,7 @@ export function lava(element: HTMLElement, options: LavaOptions = {}): Lava {
       seen?.disconnect();
       document.removeEventListener("visibilitychange", onVisibility);
       reduce?.removeEventListener("change", onVisibility);
+      runner.destroy();
       renderer.destroy();
       canvas.remove();
       element.style.position = was.position;

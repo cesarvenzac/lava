@@ -1,11 +1,9 @@
 /**
  * The render, five passes, each a fragment shader over the whole of its target:
  *
- * - SCENE: the wax, ray-marched through a long lens. Solid 3D: ellipsoids run together with a
- *   smooth union, stretched along their climb, each with a trailing lobe and a neck down into a
- *   rounded pool on the bulb. Each pixel looks only at the blobs whose bounds cover it. Lit by the
- *   bulb through the wax beneath, translucent where it's thin, creased where wax meets wax, with a
- *   glossy skin; wax further back sinks into the liquid. Writes colour and depth.
+ * - SCENE: the wax, its field (field.ts) ray-marched through a long lens. Lit by the bulb through
+ *   the wax beneath, translucent where it's thin, creased where wax meets wax, coloured by its
+ *   warmth, with a satin skin; wax further back sinks into the liquid. Writes colour and depth.
  * - FOCUS: a depth of field from that depth (Dennis Gustafsson's single-pass bokeh).
  * - DOWN and UP: bloom, as Jorge Jimenez built it for Call of Duty.
  * - FILM: bloom added, exposure, ACES (Stephen Hill's fit), the corners falling off and fringing
@@ -14,246 +12,142 @@
  * Every pass is drawn by one triangle, VERTEX, covering its target.
  */
 
-import { MOST } from "./plan.ts";
-
 export const VERTEX = `#version 300 es
 void main() {
   vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
   gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
 }`;
 
+/**
+ * The scene: the wax's field (field.ts) as 3D textures, two of them blended (the last field and the
+ * one before), ray-marched from the front through a long lens to where the wax's share first passes a
+ * half; lit by the bulb below through the wax beneath each point, translucent where it's thin,
+ * creased where wax meets wax, coloured by its warmth, with a satin skin; wax further back sinking
+ * into the liquid's own light. Writes colour and depth for the depth of field.
+ */
 export const SCENE = `#version 300 es
 precision highp float;
+precision highp sampler3D;
+uniform sampler3D uWax;      // this snapshot and the next, blended: the wax share
+uniform sampler3D uWaxB;
+uniform sampler3D uHeat;     // and the warmth, 20 to 70 degrees as 0 to 1
+uniform sampler3D uHeatB;
+uniform float uBlend;
+uniform vec3 uBox;        // the lamp's inside, metres
+uniform vec4 uView;       // the front shown: x, y, width, height
 uniform vec2 uRes;
-uniform float uTime;
-uniform float uUnit;            // the box's shorter side, as a share of its height
-uniform vec4 uBlob[${MOST}];     // centre, radius
-uniform vec4 uTail[${MOST}];     // the lobe trailing it: centre, radius
-uniform vec4 uBound[${MOST}];    // what it can cover: centre on screen, radius there, half its depth
-uniform vec4 uShape[${MOST}];    // its stretch, and how much it rings as a pear and in four lobes
-uniform vec4 uMound[${MOST}];    // where the pool heaves or bulges: x, z, height, width
-uniform int uMounds;
-uniform vec4 uNeck[${MOST}];     // the neck down to the pool: its top, its bottom, its radius at each (0: none)
-uniform vec4 uRoot[${MOST}];     // what's left in the pool of a neck that parted: its foot, its top, its radius at each
-uniform float uPoolReach;       // the highest the pool, its mounds and the necks' roots reach
-uniform int uCount;
-uniform float uPool;
-uniform float uWobble;
-uniform vec3 uWax;
-uniform vec3 uHeat;
+uniform float uCell;
+uniform float uUnit;      // the frame's shorter side, metres: depth is measured in it
+uniform vec3 uWaxC;
+uniform vec3 uHot;
 uniform vec3 uLiquid;
 uniform vec3 uLight;
 uniform float uGlow;
 uniform float uGloss;
 uniform float uHaze;
-out vec4 outScene;              // colour, and depth (z, in units of the shorter side)
+uniform float uHeatAmt;
+uniform float uTime;
+out vec4 outScene;
 
 const float FAR = -4.0;
-int cand[${MOST}];
-int nc = 0;
-bool poolHere = false;
 
-float smin(float a, float b, float k) {
-  float h = max(k - abs(a - b), 0.0) / k;
-  return min(a, b) - h * h * h * k * (1.0 / 6.0);
-}
-// Inigo Quilez's ellipsoid bound: close to the true distance, and never over it.
-float ellipsoid(vec3 p, vec3 r) {
-  float k0 = length(p / r);
-  float k1 = length(p / (r * r));
-  return k0 * (k0 - 1.0) / max(k1, 1e-6);
-}
-float capsule(vec3 p, vec3 a, vec3 b, float r) {
-  vec3 pa = p - a, ba = b - a;
-  float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
-  return length(pa - ba * h) - r;
-}
-// A rounded cone from a (radius ra) to b (radius rb): Inigo Quilez's, exact. A drip tapers.
-float cone(vec3 p, vec3 a, vec3 b, float ra, float rb) {
-  vec3 ba = b - a;
-  float l2 = dot(ba, ba), rr = ra - rb, a2 = l2 - rr * rr;
-  // When one end's sphere holds the other's, the shape is simply the larger sphere.
-  if (a2 <= 1e-9) return min(length(p - a) - ra, length(p - b) - rb);
-  float il2 = 1.0 / l2;
-  vec3 pa = p - a;
-  float y = dot(pa, ba), z = y - l2;
-  vec3 xv = pa * l2 - ba * y;
-  float x2 = dot(xv, xv), y2 = y * y * l2, z2 = z * z * l2;
-  float k = sign(rr) * rr * rr * x2;
-  if (sign(z) * a2 * z2 > k) return sqrt(x2 + z2) * il2 - rb;
-  if (sign(y) * a2 * y2 < k) return sqrt(x2 + y2) * il2 - ra;
-  return (sqrt(x2 * a2 * il2) + y * rr) * il2 - ra;
-}
-float poolTop(vec2 xz) {
-  float n = xz.x / uUnit;
-  float y = -0.5 + uPool * uUnit + uUnit * (0.014 * sin(n * 3.1 + uTime * 0.11) + 0.006 * sin(n * 7.3 - uTime * 0.17));
-  // The pool heaves into a broad mound under a blob it's letting go of, and bulges round one
-  // pressing into it. Wax this thick never ripples.
-  for (int i = 0; i < ${MOST}; i++) {
-    if (i >= uMounds) break;
-    vec4 m = uMound[i];
-    if (m.z <= 0.0) continue;
-    vec2 d = (xz - m.xy) / m.w;
-    y += m.z * exp(-dot(d, d));
-  }
-  return y;
-}
-float pool(vec3 p) {
-  float rr = 0.55 * uUnit;
-  return length(vec2(p.y - (poolTop(p.xz) - rr), p.z * 1.25)) - rr;
-}
+float waxAt(vec3 p) { vec3 t = p / uBox; return mix(texture(uWax, t).r, texture(uWaxB, t).r, uBlend); }
+float heatAt(vec3 p) { vec3 t = p / uBox; return 20.0 + 50.0 * mix(texture(uHeat, t).r, texture(uHeatB, t).r, uBlend); }
 
-float wax(vec3 p) {
-  float d = 1e3, roots = 1e3;
-  for (int j = 0; j < ${MOST}; j++) {
-    if (j >= nc) break;
-    int i = cand[j];
-    vec4 b = uBlob[i];
-    vec4 sh = uShape[i];
-    float s = sh.x;
-    float side = b.w / sqrt(s);
-    vec3 l = p - b.xyz;
-    float e = ellipsoid(l, vec3(side, b.w * s, side));
-    // Slow waves run over its own surface, carried with it.
-    vec3 dir = l / max(length(l), 1e-5);
-    float waves = sin(dot(dir, vec3(2.6, 1.9, 2.2)) * 1.6 + uTime * 0.32 + float(i) * 1.7)
-                + sin(dot(dir, vec3(-2.0, 2.8, 1.1)) * 2.1 - uTime * 0.41 + float(i) * 2.9);
-    e -= b.w * 0.007 * uWobble * waves;
-    vec4 tl = uTail[i];
-    e = smin(e, length(p - tl.xyz) - tl.w, b.w * 0.7);
-    // The neck: a thick column from inside the blob down into the pool, flaring into both,
-    // thinning slowly as they part.
-    vec4 nk = uNeck[i];
-    if (nk.z > 0.0) e = smin(e, cone(p, vec3(b.x, nk.x, b.z), vec3(b.x, nk.y, b.z), nk.z, nk.w), b.w * 0.6);
-    // Blobs melt together only where they touch: the blend is a share of each blob's own size.
-    d = smin(d, e, b.w * 0.38);
-    // What a parted neck left in the pool, slumping back into it.
-    vec4 rt = uRoot[i];
-    if (rt.z > 0.0) roots = min(roots, cone(p, vec3(b.x, rt.x, b.z), vec3(b.x, rt.y, b.z), rt.z, rt.w));
-  }
-  if (poolHere) d = smin(d, smin(pool(p), roots, 0.08 * uUnit), 0.1 * uUnit);
-  else d = min(d, roots);
-  return d;
+vec3 liquid(vec2 q) {
+  // The bulb's light rising through the liquid from the floor, strongest in the middle.
+  float up = clamp(q.y / uBox.y, 0.0, 1.0);
+  float rise = exp(-up * up * 3.0);
+  float mid = (q.x - 0.5 * uBox.x) / uBox.x;
+  vec3 c = uLiquid + uLight * rise * (0.55 + 0.45 * exp(-mid * mid * 6.0)) * 0.85;
+  return c;
 }
 
 vec3 normalAt(vec3 p) {
-  const vec2 e = vec2(1.0, -1.0) * 0.0008;
-  return normalize(e.xyy * wax(p + e.xyy) + e.yyx * wax(p + e.yyx) + e.yxy * wax(p + e.yxy) + e.xxx * wax(p + e.xxx));
+  float e = uCell * 0.75;
+  vec3 g = vec3(waxAt(p + vec3(e, 0, 0)) - waxAt(p - vec3(e, 0, 0)), waxAt(p + vec3(0, e, 0)) - waxAt(p - vec3(0, e, 0)), waxAt(p + vec3(0, 0, e)) - waxAt(p - vec3(0, 0, e)));
+  return -normalize(g + 1e-6);
 }
-// How much of a point is wax, as a ramp as wide as the spacing of the samples it's summed over:
-// ramps that wide, side by side, add up to a straight line, so a thickness never steps or bands.
-float filled(vec3 p, float spacing) { return clamp(0.5 - wax(p) / spacing, 0.0, 1.0); }
-// Creases where wax meets wax: how much the space just off the surface is taken.
-float creases(vec3 p, vec3 n) {
+
+vec3 shade(vec3 p) {
+  vec3 N = normalAt(p);
+  float ndv = clamp(N.z, 0.0, 1.0);
+  float up = p.y / uBox.y;
+  float bulb = exp(-clamp(up, 0.0, 1.5) * 2.2) * (0.78 + 0.22 * exp(-pow((p.x - 0.5 * uBox.x) / uBox.x, 2.0) * 6.0));
+  // The wax between this point and the bulb, and behind it from the eye: a few samples each, set
+  // off by a share of a step at each pixel so their steps become a noise the grain hides.
+  float jit = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+  float below = 0.0, seen = 0.0;
+  float down = 0.08 * uUnit / 4.0, back = 0.06 * uUnit / 4.0;
+  for (int i = 0; i < 4; i++) {
+    float k = float(i) + 0.5 + jit;
+    below += waxAt(p - vec3(0.0, k * down, 0.0));
+    seen += waxAt(p - vec3(0.0, 0.0, k * back));
+  }
+  float E = bulb * exp(-below * 0.36);
+  float thin = exp(-seen * 0.45);
+  float facing = clamp((dot(N, normalize(vec3(0.0, -1.0, 0.3))) + 0.6) / 1.6, 0.0, 1.0);
+  // Creases: how much the space just off the surface is taken.
   float o = 0.0, w = 0.5;
   for (int i = 1; i <= 3; i++) {
     float h = float(i) * 0.028 * uUnit;
-    o += w * clamp((h - wax(p + n * h)) / h, 0.0, 1.0);
+    o += w * clamp(waxAt(p + N * h) * 2.0 - 0.5, 0.0, 1.0);
     w *= 0.6;
   }
-  return clamp(1.0 - 0.75 * o, 0.0, 1.0);
-}
-
-vec3 liquid(vec2 q, float aspect) {
-  float rise = exp(-pow((q.y + 0.62) / 0.62, 2.0));
-  float middle = 0.55 + 0.45 * exp(-q.x * q.x / (aspect * aspect * 0.14));
-  vec3 c = uLiquid + uLight * rise * middle * 0.85;
-  return c * (0.95 + 0.05 * sin(q.x * 2.3 + uTime * 0.05) * sin(q.y * 1.9 - uTime * 0.04));
-}
-
-vec3 shade(vec3 p, float aspect) {
-  vec3 N = normalAt(p);
-  float ndv = clamp(N.z, 0.0, 1.0);
-  float bulb = exp(-clamp(p.y + 0.5, 0.0, 1.6) * 1.3) * (0.78 + 0.22 * exp(-p.x * p.x / (aspect * aspect * 0.16)));
-  // The wax between this point and the bulb, and between it and the eye.
-  float below = 0.0, seen = 0.0;
-  float down = 0.055 * uUnit, back = 0.04 * uUnit;
-  for (int i = 1; i <= 3; i++) {
-    vec3 x = p - vec3(0.0, float(i) * down, 0.0);
-    below += filled(x, down) * clamp((x.y + 0.5) / down + 0.5, 0.0, 1.0);
-    seen += filled(p - vec3(0.0, 0.0, float(i) * back), back);
-  }
-  float E = bulb * exp(-below * 0.36);        // the bulb's light that reaches here
-  float thin = exp(-seen * 0.45);             // 1 where the eye sees through little wax
-  float facing = clamp((dot(N, normalize(vec3(0.0, -1.0, 0.3))) + 0.6) / 1.6, 0.0, 1.0);
-  float ao = creases(p, N);
-  vec3 deep = uWax * uWax * 0.85;
-  vec3 body = mix(deep, uWax, clamp(E * 1.5 + 0.15, 0.0, 1.0));
-  body = mix(body, uHeat, clamp(E * (0.75 * thin + 0.7 * pow(1.0 - ndv, 2.0)) + 0.12 * E, 0.0, 1.0));
-  // Lit by the bulb through the wax under it; glowing a little everywhere with the light scattered
-  // inside it; and taking the colour of the lit liquid all round it.
+  float ao = clamp(1.0 - 0.75 * o, 0.0, 1.0);
+  float T = heatAt(p);
+  float hot = smoothstep(50.0, 57.0, T) * uHeatAmt;
+  float cold = smoothstep(48.0, 40.0, T) * uHeatAmt;
+  vec3 deep = uWaxC * uWaxC * 0.85;
+  vec3 body = mix(deep, uWaxC, clamp(E * 1.5 + 0.15, 0.0, 1.0));
+  body = mix(body, uHot, clamp(E * (0.75 * thin + 0.7 * pow(1.0 - ndv, 2.0)) + 0.12 * E, 0.0, 1.0));
+  body = mix(body, uHot, 0.3 * hot);
+  body *= 1.0 - 0.35 * cold;
   vec3 c = body * (0.07 + E * (0.45 + 1.9 * facing) * 2.3 * uGlow) * ao;
+  c += uHot * hot * hot * (0.12 + 0.2 * thin) * (0.5 + E) * ao;
   c += body * uLight * 0.45 * ao;
-  c += uLight * pow(1.0 - ndv, 3.0) * 0.3 * ao;                        // the lit liquid behind, caught at the rim
-  // A glossy skin: a GGX highlight from a soft key light, and the soft box and the lit liquid seen in it.
-  vec3 L = normalize(vec3(-0.5, 0.72, 0.55));
-  vec3 H = normalize(L + vec3(0.0, 0.0, 1.0));
-  float rough = mix(0.42, 0.09, clamp(uGloss / 1.5, 0.0, 1.0));
-  float a2 = rough * rough * rough * rough;
-  float ndh = max(dot(N, H), 0.0);
-  float den = ndh * ndh * (a2 - 1.0) + 1.0;
-  float ggx = a2 / (3.14159 * den * den);
-  float fres = 0.04 + 0.96 * pow(1.0 - ndv, 5.0);
-  c += vec3(1.0, 0.96, 0.92) * min(ggx * fres * 0.25, 8.0) * min(uGloss, 1.0) * ao;
+  c += uLight * pow(1.0 - ndv, 3.0) * 0.3 * ao;
   vec3 R = reflect(vec3(0.0, 0.0, -1.0), N);
-  c += (vec3(1.0, 0.96, 0.92) * smoothstep(0.82, 0.97, dot(R, L)) * 0.9 + uLight * 0.3 * clamp(-R.y, 0.0, 1.0)) * fres * uGloss * ao;
+  float fres = 0.04 + 0.96 * pow(1.0 - ndv, 5.0);
+  c += uLight * (0.4 * clamp(-R.y, 0.0, 1.0) + 0.06) * fres * uGloss * ao;
   return c;
 }
 
 void main() {
-  float aspect = uRes.x / uRes.y;
-  vec2 q = (gl_FragCoord.xy - 0.5 * uRes) / uRes.y;
-  vec3 back = liquid(q, aspect);
-  // Only the blobs that can matter here are looked at: those whose bounds cover this pixel, or
-  // reach the points below it that its light is measured through. Otherwise a blob would be
-  // found or lost as a pixel crossed a bound, and its light would jump.
-  float zHi = -1e3, zLo = 1e3;
-  float reach = 0.18 * uUnit;
-  bool onRay = false;
-  for (int i = 0; i < ${MOST}; i++) {
-    if (i >= uCount) break;
-    vec4 bd = uBound[i];
-    vec2 dd = q - bd.xy;
-    // The light is measured straight down: a bound counts for the column of points under it.
-    dd.y = dd.y > 0.0 ? max(dd.y - reach, 0.0) : dd.y;
-    float near_ = bd.z + 0.03 * uUnit;
-    if (dot(dd, dd) < near_ * near_) {
-      cand[nc] = i;
-      nc++;
-      vec2 own = q - bd.xy;
-      if (dot(own, own) < bd.z * bd.z) {
-        onRay = true;
-        zHi = max(zHi, uBlob[i].z + bd.w);
-        zLo = min(zLo, uBlob[i].z - bd.w);
-      }
-    }
+  vec2 q = uView.xy + gl_FragCoord.xy / uRes * uView.zw;
+  vec3 back = liquid(q);
+  if (q.x < 0.0 || q.x > uBox.x || q.y < 0.0 || q.y > uBox.y) { outScene = vec4(back, FAR); return; }
+  // March from the front, half a cell at a time, to where the wax share first passes a half.
+  float step_ = 0.5 * uCell;
+  float z = uBox.z - 0.5 * uCell;
+  float prev = waxAt(vec3(q, z));
+  float most = prev;
+  bool hit = prev >= 0.5;
+  float zh = z;
+  for (int i = 0; i < 400; i++) {
+    if (hit || z < 0.5 * uCell) break;
+    float zn = z - step_;
+    float now = waxAt(vec3(q, zn));
+    most = max(most, now);
+    if (now >= 0.5) { zh = zn + step_ * (now - 0.5) / max(now - prev, 1e-4); hit = true; break; }
+    prev = now;
+    z = zn;
   }
-  // The pool: wherever its blend can reach, its highest sway and the blend's width above that,
-  // and the points below that are measured.
-  float poolReach = uPoolReach;
-  poolHere = uPool > 0.0 && q.y < poolReach + reach + 0.03 * uUnit;
-  if (uPool > 0.0 && q.y < poolReach) { onRay = true; zHi = max(zHi, 0.46 * uUnit); zLo = min(zLo, -0.46 * uUnit); }
-  if (!onRay) { outScene = vec4(back, FAR); return; }
-
-  // A long lens: every ray runs straight back, so nothing leans.
-  float span = zHi - zLo;
-  float t = 0.0, closest = 1e3, at = 0.0;
-  bool hit = false;
-  for (int i = 0; i < 80; i++) {
-    float d = wax(vec3(q, zHi - t));
-    if (d < closest) { closest = d; at = t; }
-    if (d < 0.0003) { hit = true; break; }
-    t += max(d * 0.75, 0.001);
-    if (t > span) break;
-  }
-  // Edges are covered by how near the ray came, in pixels: smooth without more rays.
-  float cover = hit ? 1.0 : 1.0 - smoothstep(0.0, 1.4 / uRes.y, closest);
+  // Edges covered by how near the ray came to the surface: smooth without more rays.
+  float cover = hit ? 1.0 : smoothstep(0.3, 0.5, most);
   if (cover <= 0.0) { outScene = vec4(back, FAR); return; }
-  vec3 p = vec3(q, zHi - (hit ? t : at));
-  vec3 c = shade(p, aspect);
+  if (!hit) {
+    // Find where it came nearest, and shade there.
+    zh = uBox.z;
+    float best = -1.0;
+    for (float t = uBox.z - 0.5 * uCell; t > 0.0; t -= uCell) { float v = waxAt(vec3(q, t)); if (v > best) { best = v; zh = t; } }
+  }
+  vec3 p = vec3(q, zh);
+  vec3 c = shade(p);
   // Wax further back sinks into the liquid's own light.
-  c = mix(back, c, exp(-max(-p.z, 0.0) / uUnit * 2.2 * uHaze));
-  outScene = vec4(mix(back, c, cover), cover > 0.5 ? p.z / uUnit : FAR);
+  float depth = (p.z - 0.5 * uBox.z) / uUnit;
+  c = mix(back, c, exp(-max(-depth, 0.0) * 2.2 * uHaze));
+  outScene = vec4(mix(back, c, cover), cover > 0.5 ? depth : FAR);
 }`;
 
 export const FOCUS = `#version 300 es

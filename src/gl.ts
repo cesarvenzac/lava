@@ -1,5 +1,6 @@
 /**
- * A lamp's WebGL 2 side: its context, its five programs and their targets, and drawing a frame.
+ * A lamp's WebGL 2 side: its context, its five programs and their targets, the wax's fields as 3D
+ * textures, and drawing a frame.
  *
  * The programs are compiled without holding up the page: where the driver compiles on the side
  * (`KHR_parallel_shader_compile`) each frame asks whether it's done, which never waits; elsewhere
@@ -7,7 +8,6 @@
  * target to draw into, the lamp shows its stand-in. A context lost is waited out and made again.
  */
 
-import type { Frame } from "./motion.ts";
 import { DOWN, FILM, FOCUS, SCENE, UP, VERTEX } from "./shaders.ts";
 
 type Rgb = readonly [number, number, number];
@@ -18,11 +18,11 @@ export type Look = {
   hot: Rgb;
   liquid: Rgb;
   light: Rgb;
-  pool: number;
-  wobble: number;
   glow: number;
   gloss: number;
   haze: number;
+  /** How much the wax's warmth colours it. */
+  heat: number;
   aperture: number;
   focus: number;
   bloom: number;
@@ -32,12 +32,21 @@ export type Look = {
 
 export type Readiness = "waiting" | "ready" | "unavailable";
 
+/** The part of the lamp's front a frame shows, in its units (the lamp is 1 tall): lower left corner, width and height. */
+export type View = { x: number; y: number; width: number; height: number };
+
+/** The lamp's inside, in its units. */
+export const BOX: [number, number, number] = [0.4, 1, 0.4];
+
 export type Renderer = {
   /** Moves a waiting compile on, and says where it stands. Never waits. */
   poll(): Readiness;
   /** What's shown, and what's rendered before it's scaled up to that. */
   size(width: number, height: number, sceneWidth: number, sceneHeight: number): void;
-  draw(frame: Frame, look: Look, time: number, index: number): void;
+  /** A field into slot 0 or 1: the wax's share on the lamp's grid and its warmth, as bytes. */
+  upload(slot: 0 | 1, wax: Uint8Array, heat: Uint8Array, dims: [number, number, number]): void;
+  /** Draws the two slots blended, 0 being slot 0 and 1 slot 1. */
+  draw(view: View, look: Look, time: number, index: number, blend: number): void;
   destroy(): void;
 };
 
@@ -74,6 +83,10 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
   let focused: Target | null = null;
   let bloom: Target[] = [];
   let sizes = { width: 1, height: 1, sceneWidth: 1, sceneHeight: 1 };
+  // The fields: textures for each slot, and what was last put in each, to put back after a loss.
+  let volumes: { wax: WebGLTexture; heat: WebGLTexture }[] = [];
+  const held: ({ wax: Uint8Array; heat: Uint8Array; dims: [number, number, number] } | null)[] = [null, null];
+  let cell = 0.01;
 
   function start() {
     if (!gl || gl.isContextLost()) return;
@@ -129,6 +142,7 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
     programs = result;
     vao = gl.createVertexArray();
     makeTargets();
+    makeVolumes();
     return (readiness = "ready");
   }
 
@@ -167,6 +181,35 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
     }
   }
 
+  function volume(): WebGLTexture {
+    const t = gl!.createTexture()!;
+    gl!.bindTexture(gl!.TEXTURE_3D, t);
+    gl!.texParameteri(gl!.TEXTURE_3D, gl!.TEXTURE_MIN_FILTER, gl!.LINEAR);
+    gl!.texParameteri(gl!.TEXTURE_3D, gl!.TEXTURE_MAG_FILTER, gl!.LINEAR);
+    for (const wrap of [gl!.TEXTURE_WRAP_S, gl!.TEXTURE_WRAP_T, gl!.TEXTURE_WRAP_R]) gl!.texParameteri(gl!.TEXTURE_3D, wrap, gl!.CLAMP_TO_EDGE);
+    // Empty until a field comes: a single cell of liquid.
+    gl!.texImage3D(gl!.TEXTURE_3D, 0, gl!.R8, 1, 1, 1, 0, gl!.RED, gl!.UNSIGNED_BYTE, new Uint8Array(1));
+    return t;
+  }
+  function makeVolumes() {
+    if (!gl) return;
+    for (const v of volumes) {
+      gl.deleteTexture(v.wax);
+      gl.deleteTexture(v.heat);
+    }
+    volumes = [0, 1].map(() => ({ wax: volume(), heat: volume() }));
+    held.forEach((field, slot) => field && put(slot as 0 | 1, field.wax, field.heat, field.dims));
+  }
+  function put(slot: 0 | 1, wax: Uint8Array, heat: Uint8Array, dims: [number, number, number]) {
+    if (!gl || !volumes[slot]) return;
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.bindTexture(gl.TEXTURE_3D, volumes[slot].wax);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, dims[0], dims[1], dims[2], 0, gl.RED, gl.UNSIGNED_BYTE, wax);
+    gl.bindTexture(gl.TEXTURE_3D, volumes[slot].heat);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, dims[0], dims[1], dims[2], 0, gl.RED, gl.UNSIGNED_BYTE, heat);
+    cell = BOX[1] / dims[1];
+  }
+
   function pass(program: Program, out: Target | null, width: number, height: number) {
     gl!.bindFramebuffer(gl!.FRAMEBUFFER, out ? out.buffer : null);
     gl!.viewport(0, 0, width, height);
@@ -187,6 +230,7 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
     compiling = null;
     scene = focused = null;
     bloom = [];
+    volumes = [];
   };
   const onRestored = () => {
     start();
@@ -209,36 +253,41 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
       canvas.height = height;
       if (before.sceneWidth !== sceneWidth || before.sceneHeight !== sceneHeight || !scene) makeTargets();
     },
-    draw(frame, look, time, index) {
-      if (!gl || !programs || !scene || !focused || gl.isContextLost()) return;
+    upload(slot, wax, heat, dims) {
+      held[slot] = { wax, heat, dims };
+      put(slot, wax, heat, dims);
+    },
+    draw(view, look, time, index, blend) {
+      if (!gl || !programs || !scene || !focused || !volumes.length || gl.isContextLost()) return;
       const { width, height, sceneWidth: sw, sceneHeight: sh } = sizes;
       gl.bindVertexArray(vao);
-      const unit = Math.min(1, width / height);
       // The scene.
       const s = programs.scene, u = s.at;
       gl.useProgram(s.program);
+      const bind = (unit: number, t: WebGLTexture, name: string) => {
+        gl.activeTexture(gl.TEXTURE0 + unit);
+        gl.bindTexture(gl.TEXTURE_3D, t);
+        gl.uniform1i(u[name], unit);
+      };
+      bind(0, volumes[0].wax, "uWax");
+      bind(1, volumes[1].wax, "uWaxB");
+      bind(2, volumes[0].heat, "uHeat");
+      bind(3, volumes[1].heat, "uHeatB");
+      gl.uniform1f(u.uBlend, blend);
+      gl.uniform3f(u.uBox, ...BOX);
+      gl.uniform4f(u.uView, view.x, view.y, view.width, view.height);
       gl.uniform2f(u.uRes, sw, sh);
+      gl.uniform1f(u.uCell, cell);
+      gl.uniform1f(u.uUnit, Math.min(view.width, view.height));
       gl.uniform1f(u.uTime, time);
-      gl.uniform1f(u.uUnit, unit);
-      gl.uniform4fv(u.uBlob, frame.blobs);
-      gl.uniform4fv(u.uTail, frame.tails);
-      gl.uniform4fv(u.uBound, frame.bounds);
-      gl.uniform4fv(u.uShape, frame.shapes);
-      gl.uniform4fv(u.uNeck, frame.necks);
-      gl.uniform4fv(u.uRoot, frame.roots);
-      gl.uniform4fv(u.uMound, frame.mounds);
-      gl.uniform1i(u.uMounds, frame.count);
-      gl.uniform1f(u.uPoolReach, frame.poolReach);
-      gl.uniform1i(u.uCount, frame.count);
-      gl.uniform1f(u.uPool, look.pool);
-      gl.uniform1f(u.uWobble, look.wobble);
-      gl.uniform3f(u.uWax, ...look.wax);
-      gl.uniform3f(u.uHeat, ...look.hot);
+      gl.uniform3f(u.uWaxC, ...look.wax);
+      gl.uniform3f(u.uHot, ...look.hot);
       gl.uniform3f(u.uLiquid, ...look.liquid);
       gl.uniform3f(u.uLight, ...look.light);
       gl.uniform1f(u.uGlow, look.glow);
       gl.uniform1f(u.uGloss, look.gloss);
       gl.uniform1f(u.uHaze, look.haze);
+      gl.uniform1f(u.uHeatAmt, look.heat);
       pass(s, scene, sw, sh);
       // Its depth of field: blurs up to about 2% of its height across, never fewer than some thirty samples.
       const f = programs.focus;
@@ -282,6 +331,7 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
       gl.uniform1f(film.at.uFrame, index % 1000);
       pass(film, null, width, height);
       gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, null);
       gl.bindVertexArray(null);
     },
     destroy() {
@@ -289,6 +339,10 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
       canvas.removeEventListener("webglcontextrestored", onRestored);
       if (!gl) return;
       [scene, focused, ...bloom].forEach(release);
+      for (const v of volumes) {
+        gl.deleteTexture(v.wax);
+        gl.deleteTexture(v.heat);
+      }
       if (programs) for (const program of Object.values(programs)) gl.deleteProgram(program.program);
       gl.getExtension("WEBGL_lose_context")?.loseContext();
     },

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.0
+
+The lamp is simulated now, its wax thousands of particles in 3D, tuned to footage of real lamps.
+
+- Warm wax rises from the pool as a plume on a stem whose neck thins and breaks; blobs gather and press together under the top, dented where they meet, and run into one only after half a minute touching; cooled, they sink and rest on the pool before joining it. The liquid carries the wax on slow currents of its own. Measured as the footage was, it rises, sinks and drifts at a real lamp's speeds.
+- `mood`: `busy` (the default) or `calm`. Each starts from a lamp already running.
+- The simulation runs in a worker started from its own source, with nothing to set up; where a page refuses that, in the page itself. `rate` says how near its own pace the device keeps it.
+- The lamp is two and a half times as tall as it's wide: a box that shape or taller shows all of it, a wider one a band of it, which `place` chooses.
+- `heat` is how much the wax's warmth colours it, now 1 by default.
+- Breaking: `seed`, `count`, `size`, `pool`, `wobble`, `start` and `seek()` are gone, with the scripted motion they set; `speed` goes up to 3.
+
 ## 0.1.0
 
 The first version.

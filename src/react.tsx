@@ -24,7 +24,7 @@ export type LavaProps = LavaOptions &
   Omit<HTMLAttributes<HTMLDivElement>, "children"> & {
     /** Drawn over the wax. */
     children?: ReactNode;
-    /** Called with the lamp once it's made, and with null once it's gone: for `seek()` and the like. */
+    /** Called with the lamp once it's made, and with null once it's gone: for its `time` and `rate`, and the like. */
     handle?: (lamp: Handle | null) => void;
   };
 
@@ -32,12 +32,9 @@ export type LavaProps = LavaOptions &
 export function Lava({
   palette,
   colours,
-  seed,
+  mood,
   speed,
-  count,
-  size,
-  pool,
-  wobble,
+  place,
   glow,
   bloom,
   gloss,
@@ -45,10 +42,10 @@ export function Lava({
   aperture,
   focus,
   haze,
+  heat,
   grain,
   label,
   reducedMotion,
-  start,
   maxPixels,
   paused,
   handle,
@@ -58,7 +55,7 @@ export function Lava({
 }: LavaProps) {
   const ref = useRef<HTMLDivElement>(null);
   const made = useRef<Handle | null>(null);
-  const options: LavaOptions = { palette, colours, seed, speed, count, size, pool, wobble, glow, bloom, gloss, exposure, aperture, focus, haze, grain, label, reducedMotion, start, maxPixels, paused };
+  const options: LavaOptions = { palette, colours, mood, speed, place, glow, bloom, gloss, exposure, aperture, focus, haze, heat, grain, label, reducedMotion, maxPixels, paused };
   const latest = useRef({ options, handle });
   // Before the effects below read them: this render's options and callback.
   useIsomorphicLayoutEffect(() => {
