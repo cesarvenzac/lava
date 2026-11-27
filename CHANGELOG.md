@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+The simulation can be seen as it runs.
+
+- `view`: `wax` (the default), the lamp as it looks; `blobs`, its particles seen from the side, each blob in a colour of its own; or `warmth`, each particle by how warm it is. Colours come from the palette.
+- `snapshot()`: a picture of the next frame drawn, as an `ImageBitmap`, in any view, paused or not.
+
 ## 0.2.0
 
 The lamp is simulated now, its wax thousands of particles in 3D, tuned to footage of real lamps.

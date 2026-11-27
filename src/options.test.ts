@@ -58,3 +58,13 @@ describe("palettes", () => {
     expect(css.startsWith("radial-gradient(")).toBe(true);
   });
 });
+
+describe("the view", () => {
+  it("is the wax unless the simulation's particles are asked for", () => {
+    expect(settle({}).view).toBe("wax");
+    expect(settle({ view: "blobs" }).view).toBe("blobs");
+    expect(settle({ view: "warmth" }, settle({ view: "blobs" })).view).toBe("warmth");
+    // Anything else keeps what it was.
+    expect(settle({ view: "x-ray" as never }, settle({ view: "blobs" })).view).toBe("blobs");
+  });
+});

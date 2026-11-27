@@ -143,6 +143,9 @@ export function generator(seed: number): () => number {
 /** How deep the pool lies at the start, as a share of the height. */
 const POOL = 0.15;
 
+/** The particles' spacing at rest, in the lamp's units (it's 1 tall). */
+export const spacingOf = (p: Pick<Params, "width" | "count">) => Math.cbrt((p.width * p.width * POOL) / p.count);
+
 /**
  * A lamp: the wax a pool on the floor, on a jittered lattice. Settled, the pool is let rest before
  * anything heats it: the lattice isn't quite how the particles rest together, and let go as it is it
@@ -151,7 +154,7 @@ const POOL = 0.15;
 export function lampOf(params: Params, settled = true): Lamp {
   const p = params;
   const W = p.width;
-  const spacing = Math.cbrt((W * W * POOL) / p.count);
+  const spacing = spacingOf(p);
   const random = generator(1);
   const xs: number[] = [], ys: number[] = [], zs: number[] = [];
   for (let k = 0; (k + 0.5) * spacing <= W; k++)

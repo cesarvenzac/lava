@@ -16,13 +16,18 @@
  * and the tab is shown, and holds still where the visitor's system asks for less motion. Where it
  * stands is the element's `data-lava`: "waiting" for its shaders and its first field, "drawing", or
  * "unavailable" where the browser can't draw it.
+ *
+ * Its `view` can show the simulation itself instead: the particles seen from the side, each blob in a
+ * colour of its own or each particle by its warmth, on the liquid.
  */
 
-import { BOX, type Look, type Readiness, rendererFor, type View } from "./gl.ts";
+import { dotColoursOf } from "./dots.ts";
+import { BOX, type DotsLook, type Look, type Readiness, rendererFor, type View } from "./gl.ts";
 import type { Sent } from "./loop.ts";
 import { type LavaOptions, type Settings, settle } from "./options.ts";
 import { standInOf, toLinear } from "./palettes.ts";
 import { runnerOf } from "./runner.ts";
+import { MOODS, spacingOf } from "./sim.ts";
 
 export type Lava = {
   /** The element it's drawn in. */
@@ -37,6 +42,11 @@ export type Lava = {
   readonly rate: number;
   /** Whether it's drawing yet: until then, and if it never can, its stand-in shows. */
   readonly drawing: boolean;
+  /**
+   * A picture of the lamp as it's drawn now, at the size it's drawn: once it's drawing, the next frame
+   * (drawn for it even while it's paused or still); null where it can't be drawn.
+   */
+  snapshot(): Promise<ImageBitmap | null>;
   /** Takes it out of the element and gives back everything it changed there. */
   destroy(): void;
 };
@@ -62,6 +72,16 @@ function rgbOf(css: string, element: HTMLElement): Rgb {
   const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
   return [r / 255, g / 255, b / 255];
 }
+
+function dotsLookOf(settings: Settings, element: HTMLElement): DotsLook {
+  const { colours } = settings;
+  const palette = { wax: rgbOf(colours.wax, element), hot: rgbOf(colours.hot, element), liquid: rgbOf(colours.liquid, element), light: rgbOf(colours.light, element) };
+  return { mode: settings.view === "warmth" ? "warmth" : "blobs", fog: 0.45, ...dotColoursOf(palette) };
+}
+
+/** How wide a dot is drawn, as a share of the particles' spacing. */
+const DOT = 0.2;
+const SPACING = spacingOf(MOODS.busy);
 
 function lookOf(settings: Settings, element: HTMLElement): Look {
   const linear = (css: string) => toLinear(rgbOf(css, element));
@@ -103,6 +123,7 @@ export function viewOf(aspect: number, place: number): View {
 export function lava(element: HTMLElement, options: LavaOptions = {}): Lava {
   let settings = settle(options);
   let look = lookOf(settings, element);
+  let dotsLook = dotsLookOf(settings, element);
   let time = 0;
   let rate = 0;
 
@@ -179,14 +200,21 @@ export function lava(element: HTMLElement, options: LavaOptions = {}): Lava {
   const still = () => settings.reducedMotion ?? reduce?.matches ?? false;
   const moving = () => !destroyed && onScreen && !document.hidden && !settings.paused && !still();
 
-  // The fields: each into the slot the one before isn't in, the picture moving toward it over the
-  // time it took to come.
+  // What's drawn as it comes (fields of wax, or the particles): each into the slot the one before
+  // isn't in, the picture moving toward it over the time it took to come. Counted afresh when the
+  // view changes, since what came before was the other kind.
   let fields = 0, newest: 0 | 1 = 1, arrived = 0, gap = 1 / 20;
+  const kindOf = () => (settings.view === "wax" ? "field" : "particles");
   const runner = runnerOf((sent: Sent) => {
-    if (destroyed) return;
+    if (destroyed || sent.kind !== kindOf()) return;
     const slot: 0 | 1 = newest === 0 ? 1 : 0;
-    renderer.upload(slot, sent.wax, sent.heat, sent.dims);
-    if (!fields) renderer.upload(newest, sent.wax, sent.heat, sent.dims);
+    if (sent.kind === "field") {
+      renderer.upload(slot, sent.wax, sent.heat, sent.dims);
+      if (!fields) renderer.upload(newest, sent.wax, sent.heat, sent.dims);
+    } else {
+      if (!fields) renderer.uploadDots(newest, sent);
+      renderer.uploadDots(slot, sent);
+    }
     const now = performance.now();
     if (fields) gap = Math.max(0.02, Math.min(0.5, (now - arrived) / 1000));
     arrived = now;
@@ -197,7 +225,7 @@ export function lava(element: HTMLElement, options: LavaOptions = {}): Lava {
     request();
   });
   let running = moving();
-  runner.start(settings.mood, settings.speed, running);
+  runner.start(settings.mood, settings.speed, running, settings.view);
   const follow = () => {
     const now = moving();
     if (now !== running) {
@@ -206,10 +234,23 @@ export function lava(element: HTMLElement, options: LavaOptions = {}): Lava {
     }
   };
 
+  // Pictures asked for, taken as soon as a frame is drawn.
+  let wanted: ((picture: ImageBitmap | null) => void)[] = [];
+  const answer = (picture: (() => Promise<ImageBitmap | null>) | null) => {
+    const waiting = wanted;
+    wanted = [];
+    // Each its own picture, all taken now, while the frame just drawn is still the canvas's.
+    for (const resolve of waiting) (picture ? picture() : Promise.resolve(null)).then(resolve, () => resolve(null));
+  };
+
   function draw(readiness: Readiness, now: number) {
     if (readiness !== "ready" || !size.width || !fields) return false;
     const toward = Math.min(1, (now - arrived) / 1000 / gap);
-    renderer.draw(viewOf(size.width / size.height, settings.place), look, now / 1000, frames, newest === 1 ? toward : 1 - toward);
+    const view = viewOf(size.width / size.height, settings.place);
+    const blend = newest === 1 ? toward : 1 - toward;
+    if (settings.view === "wax") renderer.draw(view, look, now / 1000, frames, blend);
+    else renderer.drawDots(view, dotsLook, blend, Math.max(1, DOT * SPACING * (size.height / view.height)));
+    if (wanted.length) answer(() => createImageBitmap(canvas));
     if (!shown) {
       shown = true;
       canvas.style.opacity = "1";
@@ -226,6 +267,7 @@ export function lava(element: HTMLElement, options: LavaOptions = {}): Lava {
     if (readiness === "unavailable") {
       element.dataset.lava = "unavailable";
       runner.set({ running: (running = false) });
+      answer(null);
       return;
     }
     if (readiness === "waiting" || !fields) {
@@ -254,6 +296,8 @@ export function lava(element: HTMLElement, options: LavaOptions = {}): Lava {
       // Still, it draws only when asked or while a field comes in, blended in over a few frames.
       if (draw(readiness, now)) raf = requestAnimationFrame(tick);
     }
+    // A picture asked for before anything could be drawn: asked again next frame.
+    if (wanted.length && !raf) raf = requestAnimationFrame(tick);
   }
   function request() {
     if (!raf && !destroyed) raf = requestAnimationFrame(tick);
@@ -278,14 +322,19 @@ export function lava(element: HTMLElement, options: LavaOptions = {}): Lava {
     const before = settings;
     settings = settle(next, settings);
     look = lookOf(settings, element);
+    dotsLook = dotsLookOf(settings, element);
     paintStandIn();
     if (labelled && settings.label !== before.label) element.setAttribute("aria-label", settings.label);
     if (settings.maxPixels !== before.maxPixels) resize(true);
+    if (settings.view !== before.view) fields = 0;
     if (settings.mood !== before.mood) {
       // Another lamp: started from its own warm start.
       running = moving();
-      runner.start(settings.mood, settings.speed, running);
-    } else if (settings.speed !== before.speed) runner.set({ speed: settings.speed });
+      runner.start(settings.mood, settings.speed, running, settings.view);
+    } else {
+      if (settings.speed !== before.speed) runner.set({ speed: settings.speed });
+      if (settings.view !== before.view) runner.set({ view: settings.view });
+    }
     request();
   }
 
@@ -303,9 +352,17 @@ export function lava(element: HTMLElement, options: LavaOptions = {}): Lava {
     get drawing() {
       return shown;
     },
+    snapshot() {
+      if (destroyed || element.dataset.lava === "unavailable") return Promise.resolve(null);
+      return new Promise((resolve) => {
+        wanted.push(resolve);
+        request();
+      });
+    },
     destroy() {
       if (destroyed) return;
       destroyed = true;
+      answer(null);
       if (raf) cancelAnimationFrame(raf);
       resized.disconnect();
       seen?.disconnect();

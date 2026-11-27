@@ -1,22 +1,61 @@
 /**
  * The lamp kept running: steps taken as real time passes (times `speed`), never more than a few at
  * once, so a slow machine runs the lamp slower rather than stutter; and every `EVERY` seconds of the
- * lamp's own time, its wax as a field, handed on with the lamp's time and how many of its seconds
- * passed in each real one lately. Run in a worker (worker.ts), or in the page where workers are
- * refused (runner.ts).
+ * lamp's own time, what's drawn of it (its wax as a field, or its particles as they are), handed on
+ * with the lamp's time and how many of its seconds passed in each real one lately. Run in a worker
+ * (worker.ts), or in the page where workers are refused (runner.ts).
  */
 
 import { type Field, fieldOf } from "./field.ts";
 import { type Lamp, lampOf, MOODS, type Mood, step } from "./sim.ts";
 import { unpackLamp, unzip } from "./warm.ts";
 
-/** How often a field is sent, in the lamp's seconds. */
+/** How often what's drawn is sent, in the lamp's seconds. */
 export const EVERY = 1 / 20;
 
-export type Start = { type: "start"; mood: Mood; warm: string | null; speed: number; running: boolean };
-export type Change = { type: "set"; speed?: number; running?: boolean };
+/** What a lamp is drawn as: its wax, or its particles, each blob in a colour of its own or each particle by its warmth. */
+export type View = "wax" | "blobs" | "warmth";
+
+/** How many colours the blobs are drawn in: the pool's, then one for each blob in turn. */
+export const BLOB_COLOURS = 48;
+
+/**
+ * The particles as they are: positions (x, y, z for each, in the lamp's units), the colour each is
+ * drawn in (0 for the largest blob, the pool; another for each other blob, by its label), and its
+ * warmth, 20 to 70 degrees as 0 to 255.
+ */
+export type Particles = { positions: Float32Array; colour: Uint8Array; warmth: Uint8Array };
+
+export type Start = { type: "start"; mood: Mood; warm: string | null; speed: number; running: boolean; view: View };
+export type Change = { type: "set"; speed?: number; running?: boolean; view?: View };
 export type Message = Start | Change;
-export type Sent = Field & { time: number; rate: number };
+export type Sent = ({ kind: "field" } & Field | { kind: "particles" } & Particles) & { time: number; rate: number };
+
+/** The particles of a lamp, to be drawn. */
+export function particlesOf(lamp: Lamp): Particles {
+  const { n, x, y, z, t, body } = lamp;
+  const positions = new Float32Array(3 * n);
+  const colour = new Uint8Array(n);
+  const warmth = new Uint8Array(n);
+  const counts = new Map<number, number>();
+  let pool = body[0], most = 0;
+  for (let i = 0; i < n; i++) {
+    const c = (counts.get(body[i]) ?? 0) + 1;
+    counts.set(body[i], c);
+    if (c > most) {
+      most = c;
+      pool = body[i];
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    positions[3 * i] = x[i];
+    positions[3 * i + 1] = y[i];
+    positions[3 * i + 2] = z[i];
+    colour[i] = body[i] === pool ? 0 : 1 + (body[i] % (BLOB_COLOURS - 1));
+    warmth[i] = Math.max(0, Math.min(255, Math.round(((t[i] - 20) / 50) * 255)));
+  }
+  return { positions, colour, warmth };
+}
 
 export type Loop = { handle(message: Message): void; stop(): void };
 
@@ -28,17 +67,18 @@ export type Loop = { handle(message: Message): void; stop(): void };
 export function loopOf(send: (sent: Sent) => void, budget = 30): Loop {
   let lamp: Lamp | null = null;
   let speed = 1, running = true, stopped = false, scheduled = false;
+  let view: View = "wax";
   let owed = 0, last = 0, next = 0, generation = 0;
   const recent: [number, number][] = [];
 
   const post = () => {
     if (!lamp) return;
-    const field = fieldOf(lamp);
     const now = performance.now();
     recent.push([now, lamp.time]);
     while (recent.length > 2 && now - recent[0][0] > 3000) recent.shift();
     const [t0, s0] = recent[0];
-    send({ ...field, time: lamp.time, rate: now > t0 ? ((lamp.time - s0) * 1000) / (now - t0) : speed });
+    const said = { time: lamp.time, rate: now > t0 ? ((lamp.time - s0) * 1000) / (now - t0) : speed };
+    send(view === "wax" ? { kind: "field", ...fieldOf(lamp), ...said } : { kind: "particles", ...particlesOf(lamp), ...said });
   };
 
   const turn = () => {
@@ -72,6 +112,7 @@ export function loopOf(send: (sent: Sent) => void, budget = 30): Loop {
         const made = ++generation;
         speed = message.speed;
         running = message.running;
+        view = message.view;
         const params = MOODS[message.mood] ?? MOODS.busy;
         const begin = (made2: Lamp) => {
           if (made !== generation || stopped) return;
@@ -89,6 +130,11 @@ export function loopOf(send: (sent: Sent) => void, budget = 30): Loop {
         return;
       }
       if (message.speed !== undefined) speed = Math.max(0, message.speed);
+      if (message.view !== undefined && message.view !== view) {
+        // Drawn another way: what's drawn now, at once, whether it's running or not.
+        view = message.view;
+        post();
+      }
       if (message.running !== undefined && message.running !== running) {
         running = message.running;
         last = performance.now();

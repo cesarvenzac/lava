@@ -33,6 +33,7 @@ export function Lava({
   palette,
   colours,
   mood,
+  view,
   speed,
   place,
   glow,
@@ -55,7 +56,7 @@ export function Lava({
 }: LavaProps) {
   const ref = useRef<HTMLDivElement>(null);
   const made = useRef<Handle | null>(null);
-  const options: LavaOptions = { palette, colours, mood, speed, place, glow, bloom, gloss, exposure, aperture, focus, haze, heat, grain, label, reducedMotion, maxPixels, paused };
+  const options: LavaOptions = { palette, colours, mood, view, speed, place, glow, bloom, gloss, exposure, aperture, focus, haze, heat, grain, label, reducedMotion, maxPixels, paused };
   const latest = useRef({ options, handle });
   // Before the effects below read them: this render's options and callback.
   useIsomorphicLayoutEffect(() => {

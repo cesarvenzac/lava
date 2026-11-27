@@ -3,6 +3,7 @@
  * looks right in, so no setting can break the drawing.
  */
 
+import type { View } from "./loop.ts";
 import { type Colours, PALETTES, type PaletteName } from "./palettes.ts";
 import type { Mood } from "./sim.ts";
 
@@ -13,6 +14,12 @@ export type LavaOptions = {
   colours?: Partial<Colours>;
   /** "busy" (the default): a hotter lamp, a stem often reaching the top; or "calm", one plume at a time. */
   mood?: Mood;
+  /**
+   * What's drawn: "wax" (the default), the lamp as it looks; or the simulation itself, its particles
+   * seen from the side, "blobs" each blob in a colour of its own, "warmth" each particle by how warm
+   * it is.
+   */
+  view?: View;
   /** How fast it runs, 1 being a real lamp's pace; a slow device runs it slower than asked. */
   speed?: number;
   /**
@@ -52,6 +59,7 @@ export type LavaOptions = {
 export const DEFAULTS = {
   palette: "amber" as PaletteName,
   mood: "busy" as Mood,
+  view: "wax" as View,
   speed: 1,
   place: 0.5,
   glow: 1,
@@ -99,6 +107,7 @@ export function settle(options: LavaOptions, before?: Settings): Settings {
   }
   if (!(next.palette in PALETTES)) next.palette = DEFAULTS.palette;
   if (next.mood !== "busy" && next.mood !== "calm") next.mood = was.mood;
+  if (next.view !== "wax" && next.view !== "blobs" && next.view !== "warmth") next.view = was.view;
   // A palette chosen replaces the colours; colours given are laid over it.
   const base = options.palette !== undefined ? PALETTES[next.palette] : was.colours;
   next.colours = { ...base, ...Object.fromEntries(Object.entries(options.colours ?? {}).filter(([, value]) => typeof value === "string" && value)) };

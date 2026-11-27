@@ -1,6 +1,6 @@
 {
   "name": "@cesarvenzac/lava",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A lava lamp for any box, simulated: thousands of particles of wax in 3D rising, pressing together and sinking back at a real lamp's speeds, glowing in a dark liquid, shot through a long lens with a shallow focus, bloom and a filmic grade. WebGL 2 and a worker, no dependencies.",
   "keywords": [
     "lava",

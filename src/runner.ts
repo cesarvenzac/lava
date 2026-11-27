@@ -4,14 +4,14 @@
  * a few milliseconds at a time, slower but still going.
  */
 
-import { loopOf, type Message, type Sent } from "./loop.ts";
+import { loopOf, type Message, type Sent, type View } from "./loop.ts";
 import type { Mood } from "./sim.ts";
 import { WARM } from "./warm-data.ts";
 import { WORKER } from "./worker-code.ts";
 
 export type Runner = {
-  start(mood: Mood, speed: number, running: boolean): void;
-  set(change: { speed?: number; running?: boolean }): void;
+  start(mood: Mood, speed: number, running: boolean, view: View): void;
+  set(change: { speed?: number; running?: boolean; view?: View }): void;
   destroy(): void;
 };
 
@@ -52,8 +52,8 @@ export function runnerOf(receive: (sent: Sent) => void): Runner {
   };
 
   return {
-    start(mood, speed, running) {
-      last = { type: "start", mood, warm: WARM[mood] ?? null, speed, running };
+    start(mood, speed, running, view) {
+      last = { type: "start", mood, warm: WARM[mood] ?? null, speed, running, view };
       send(last);
     },
     set(change) {

@@ -4,16 +4,19 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { type Colours, lava, type Lava, type LavaOptions, type Mood, PALETTE_NAMES, PALETTES, type PaletteName, standInOf } from "@cesarvenzac/lava";
+import { type Colours, lava, type Lava, type LavaOptions, type Mood, PALETTE_NAMES, PALETTES, type PaletteName, standInOf, type View } from "@cesarvenzac/lava";
 import { Lava as LavaComponent, type LavaProps } from "@cesarvenzac/lava/react";
 
 const palette: PaletteName = "magenta";
 const colours: Partial<Colours> = { wax: "var(--brand)", liquid: "#111" };
 const mood: Mood = "calm";
-const options: LavaOptions = { palette, colours, mood, speed: 1.2, place: 0.3, glow: 1.2, bloom: 0.8, gloss: 1, exposure: 1.1, aperture: 0.6, focus: 0.1, haze: 1.2, heat: 0.8, grain: 0.5, label: "A lamp", reducedMotion: false, maxPixels: 600_000, paused: false };
+const view: View = "blobs";
+const options: LavaOptions = { palette, colours, mood, view, speed: 1.2, place: 0.3, glow: 1.2, bloom: 0.8, gloss: 1, exposure: 1.1, aperture: 0.6, focus: 0.1, haze: 1.2, heat: 0.8, grain: 0.5, label: "A lamp", reducedMotion: false, maxPixels: 600_000, paused: false };
 export const start = (element: HTMLElement): Lava => {
   const made = lava(element, options);
-  made.set({ palette: "acid", mood: "busy" });
+  made.set({ palette: "acid", mood: "busy", view: "warmth" });
+  const picture: Promise<ImageBitmap | null> = made.snapshot();
+  void picture;
   made.pause();
   made.play();
   const time: number = made.time;

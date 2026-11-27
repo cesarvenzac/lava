@@ -1,6 +1,6 @@
 /**
- * A lamp's WebGL 2 side: its context, its five programs and their targets, the wax's fields as 3D
- * textures, and drawing a frame.
+ * A lamp's WebGL 2 side: its context, its programs and their targets, the wax's fields as 3D
+ * textures (or its particles as points), and drawing a frame.
  *
  * The programs are compiled without holding up the page: where the driver compiles on the side
  * (`KHR_parallel_shader_compile`) each frame asks whether it's done, which never waits; elsewhere
@@ -8,7 +8,8 @@
  * target to draw into, the lamp shows its stand-in. A context lost is waited out and made again.
  */
 
-import { DOWN, FILM, FOCUS, SCENE, UP, VERTEX } from "./shaders.ts";
+import type { Particles } from "./loop.ts";
+import { DOTS_FRAGMENT, DOTS_VERTEX, DOWN, FILM, FOCUS, SCENE, UP, VERTEX } from "./shaders.ts";
 
 type Rgb = readonly [number, number, number];
 
@@ -30,6 +31,21 @@ export type Look = {
   grain: number;
 };
 
+/**
+ * What the particles are drawn with: by blob (a colour for each, the pool's first) or by warmth (a
+ * ramp, cool to the crossover to hot), on the liquid, sinking toward it the further back they lie.
+ * Colours as shown (sRGB), not linear light.
+ */
+export type DotsLook = {
+  mode: "blobs" | "warmth";
+  colours: Float32Array;
+  cold: Rgb;
+  mid: Rgb;
+  hot: Rgb;
+  back: Rgb;
+  fog: number;
+};
+
 export type Readiness = "waiting" | "ready" | "unavailable";
 
 /** The part of the lamp's front a frame shows, in its units (the lamp is 1 tall): lower left corner, width and height. */
@@ -47,6 +63,10 @@ export type Renderer = {
   upload(slot: 0 | 1, wax: Uint8Array, heat: Uint8Array, dims: [number, number, number]): void;
   /** Draws the two slots blended, 0 being slot 0 and 1 slot 1. */
   draw(view: View, look: Look, time: number, index: number, blend: number): void;
+  /** The particles into slot 0 or 1 (their colours and warmth are the newest's). */
+  uploadDots(slot: 0 | 1, particles: Particles): void;
+  /** Draws the particles of the two slots blended, each dot `size` pixels across. */
+  drawDots(view: View, look: DotsLook, blend: number, size: number): void;
   destroy(): void;
 };
 
@@ -54,8 +74,16 @@ type Program = { program: WebGLProgram; at: Record<string, WebGLUniformLocation 
 type Target = { texture: WebGLTexture; buffer: WebGLFramebuffer; width: number; height: number };
 type Compiling = { programs: WebGLProgram[]; shaders: WebGLShader[] };
 
-const FRAGMENTS = { scene: SCENE, focus: FOCUS, down: DOWN, up: UP, film: FILM };
-type Name = keyof typeof FRAGMENTS;
+/** Each program's vertex and fragment shaders. */
+const PROGRAMS = {
+  scene: [VERTEX, SCENE],
+  focus: [VERTEX, FOCUS],
+  down: [VERTEX, DOWN],
+  up: [VERTEX, UP],
+  film: [VERTEX, FILM],
+  dots: [DOTS_VERTEX, DOTS_FRAGMENT],
+} as const;
+type Name = keyof typeof PROGRAMS;
 
 const later = (step: () => void) => {
   if (typeof requestIdleCallback === "function") requestIdleCallback(step, { timeout: 800 });
@@ -67,7 +95,8 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
   const gl = canvas.getContext("webgl2", {
     alpha: false,
     antialias: false,
-    depth: false,
+    // For the particles: nearer dots drawn over further ones.
+    depth: true,
     stencil: false,
     premultipliedAlpha: true,
     preserveDrawingBuffer: false,
@@ -87,6 +116,11 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
   let volumes: { wax: WebGLTexture; heat: WebGLTexture }[] = [];
   const held: ({ wax: Uint8Array; heat: Uint8Array; dims: [number, number, number] } | null)[] = [null, null];
   let cell = 0.01;
+  // The particles: where they were at each slot's post, and the newest's colours and warmth.
+  let dots: { a: WebGLBuffer; b: WebGLBuffer; colour: WebGLBuffer; warmth: WebGLBuffer; vao: WebGLVertexArrayObject } | null = null;
+  const heldDots: (Particles | null)[] = [null, null];
+  let newestDots: 0 | 1 = 0;
+  let dotCount = 0;
 
   function start() {
     if (!gl || gl.isContextLost()) return;
@@ -95,14 +129,20 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
       return;
     }
     parallel = gl.getExtension("KHR_parallel_shader_compile") as { COMPLETION_STATUS_KHR: number } | null;
-    const vertex = gl.createShader(gl.VERTEX_SHADER)!;
-    gl.shaderSource(vertex, VERTEX);
-    gl.compileShader(vertex);
-    const shaders = [vertex];
+    const shaders: WebGLShader[] = [];
+    const vertices = new Map<string, WebGLShader>();
     const made: WebGLProgram[] = [];
-    for (const source of Object.values(FRAGMENTS)) {
+    for (const [vertexSource, fragmentSource] of Object.values(PROGRAMS)) {
+      let vertex = vertices.get(vertexSource);
+      if (!vertex) {
+        vertex = gl.createShader(gl.VERTEX_SHADER)!;
+        gl.shaderSource(vertex, vertexSource);
+        gl.compileShader(vertex);
+        vertices.set(vertexSource, vertex);
+        shaders.push(vertex);
+      }
       const fragment = gl.createShader(gl.FRAGMENT_SHADER)!;
-      gl.shaderSource(fragment, source);
+      gl.shaderSource(fragment, fragmentSource);
       gl.compileShader(fragment);
       const program = gl.createProgram()!;
       gl.attachShader(program, vertex);
@@ -121,7 +161,7 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
     if (!gl || !compiling) return readiness;
     const done = parallel ? compiling.programs.every((program) => gl.getProgramParameter(program, parallel!.COMPLETION_STATUS_KHR)) : idleDone;
     if (!done) return "waiting";
-    const names = Object.keys(FRAGMENTS) as Name[];
+    const names = Object.keys(PROGRAMS) as Name[];
     const result = {} as Record<Name, Program>;
     for (const [i, program] of compiling.programs.entries()) {
       if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
@@ -143,6 +183,7 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
     vao = gl.createVertexArray();
     makeTargets();
     makeVolumes();
+    makeDots();
     return (readiness = "ready");
   }
 
@@ -210,6 +251,45 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
     cell = BOX[1] / dims[1];
   }
 
+  function makeDots() {
+    if (!gl) return;
+    if (dots) {
+      for (const buffer of [dots.a, dots.b, dots.colour, dots.warmth]) gl.deleteBuffer(buffer);
+      gl.deleteVertexArray(dots.vao);
+    }
+    const made = { a: gl.createBuffer()!, b: gl.createBuffer()!, colour: gl.createBuffer()!, warmth: gl.createBuffer()!, vao: gl.createVertexArray()! };
+    gl.bindVertexArray(made.vao);
+    const attribute = (location: number, buffer: WebGLBuffer, size: number, type: number) => {
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      gl.enableVertexAttribArray(location);
+      gl.vertexAttribPointer(location, size, type, false, 0, 0);
+    };
+    attribute(0, made.a, 3, gl.FLOAT);
+    attribute(1, made.b, 3, gl.FLOAT);
+    attribute(2, made.colour, 1, gl.UNSIGNED_BYTE);
+    attribute(3, made.warmth, 1, gl.UNSIGNED_BYTE);
+    gl.bindVertexArray(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    dots = made;
+    dotCount = 0;
+    // After a loss: both slots' places, then the newest's colours.
+    heldDots.forEach((particles, slot) => particles && putDots(slot as 0 | 1, particles, false));
+    const newest = heldDots[newestDots];
+    if (newest) putDots(newestDots, newest, true);
+  }
+  function putDots(slot: 0 | 1, particles: Particles, newest: boolean) {
+    if (!gl || !dots) return;
+    gl.bindBuffer(gl.ARRAY_BUFFER, slot === 0 ? dots.a : dots.b);
+    gl.bufferData(gl.ARRAY_BUFFER, particles.positions, gl.DYNAMIC_DRAW);
+    if (newest) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, dots.colour);
+      gl.bufferData(gl.ARRAY_BUFFER, particles.colour, gl.DYNAMIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, dots.warmth);
+      gl.bufferData(gl.ARRAY_BUFFER, particles.warmth, gl.DYNAMIC_DRAW);
+      dotCount = particles.colour.length;
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  }
   function pass(program: Program, out: Target | null, width: number, height: number) {
     gl!.bindFramebuffer(gl!.FRAMEBUFFER, out ? out.buffer : null);
     gl!.viewport(0, 0, width, height);
@@ -231,6 +311,7 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
     scene = focused = null;
     bloom = [];
     volumes = [];
+    dots = null;
   };
   const onRestored = () => {
     start();
@@ -256,6 +337,39 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
     upload(slot, wax, heat, dims) {
       held[slot] = { wax, heat, dims };
       put(slot, wax, heat, dims);
+    },
+    uploadDots(slot, particles) {
+      heldDots[slot] = particles;
+      newestDots = slot;
+      putDots(slot, particles, true);
+    },
+    drawDots(view, look, blend, size) {
+      if (!gl || !programs || !dots || !dotCount || gl.isContextLost()) return;
+      const { width, height } = sizes;
+      const d = programs.dots, u = d.at;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, width, height);
+      gl.clearColor(look.back[0], look.back[1], look.back[2], 1);
+      gl.clearDepth(1);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthFunc(gl.LEQUAL);
+      gl.useProgram(d.program);
+      gl.uniform1f(u.uBlend, blend);
+      gl.uniform4f(u.uView, view.x, view.y, view.width, view.height);
+      gl.uniform1f(u.uDepth, BOX[2]);
+      gl.uniform1f(u.uSize, size);
+      gl.uniform1f(u.uMode, look.mode === "blobs" ? 0 : 1);
+      gl.uniform3fv(u.uColours, look.colours);
+      gl.uniform3f(u.uCold, ...look.cold);
+      gl.uniform3f(u.uMid, ...look.mid);
+      gl.uniform3f(u.uHot, ...look.hot);
+      gl.uniform3f(u.uBack, ...look.back);
+      gl.uniform1f(u.uFog, look.fog);
+      gl.bindVertexArray(dots.vao);
+      gl.drawArrays(gl.POINTS, 0, dotCount);
+      gl.bindVertexArray(null);
+      gl.disable(gl.DEPTH_TEST);
     },
     draw(view, look, time, index, blend) {
       if (!gl || !programs || !scene || !focused || !volumes.length || gl.isContextLost()) return;
@@ -342,6 +456,10 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
       for (const v of volumes) {
         gl.deleteTexture(v.wax);
         gl.deleteTexture(v.heat);
+      }
+      if (dots) {
+        for (const buffer of [dots.a, dots.b, dots.colour, dots.warmth]) gl.deleteBuffer(buffer);
+        gl.deleteVertexArray(dots.vao);
       }
       if (programs) for (const program of Object.values(programs)) gl.deleteProgram(program.program);
       gl.getExtension("WEBGL_lose_context")?.loseContext();

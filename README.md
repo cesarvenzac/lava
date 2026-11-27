@@ -60,6 +60,11 @@ all of it; a wider one shows a band of it, as a picture fills a box with `object
 - **A lens.** Wax in front of and behind the focus blurs, as a macro lens draws it (`aperture`,
   `focus`); wax further back sinks into the liquid's own light (`haze`). The brightest light
   blooms, and the picture goes through a filmic tone curve, a vignette and a fine grain.
+- **Inside it.** `view`: `wax` (the default), the lamp as it looks; or the simulation itself, its
+  particles seen from the side, `blobs` each blob in a colour of its own (the pool in a muted tone
+  of the bulb's light), `warmth` each particle by how warm it is, cool in blue and fresh off the
+  coil in the wax's hot colour. `snapshot()` hands back a picture of the next frame drawn, in any
+  view, paused or not.
 - **Five palettes.** `palette`: `amber` (the default), `magenta`, `ember`, `acid` or `violet`, each a
   wax on a dark liquid. Or any colours of your own, CSS colours, `var(--…)` included:
   `colours: { wax, hot, liquid, light }`.
@@ -82,11 +87,13 @@ type Lava = {
   set(options: LavaOptions): void;
   play(): void;
   pause(): void;
+  snapshot(): Promise<ImageBitmap | null>; // the next frame drawn
   destroy(): void;
 };
 ```
 
-`LavaOptions`, each with its default: `palette` (`"amber"`), `colours`, `mood` (`"busy"`), `speed`
+`LavaOptions`, each with its default: `palette` (`"amber"`), `colours`, `mood` (`"busy"`), `view`
+(`"wax"`), `speed`
 (1), `place` (0.5), `glow` (1), `bloom` (1), `gloss` (1), `exposure` (1), `aperture` (1), `focus`
 (0), `haze` (1), `heat` (1), `grain` (1), `label`, `reducedMotion` (the system's), `maxPixels`
 (800,000), `paused` (false).

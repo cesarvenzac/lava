@@ -262,3 +262,58 @@ void main() {
   float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy + uFrame * 5.588238, vec2(0.06711056, 0.00583715))));
   outColour = vec4(srgb + (ign - 0.5) / 255.0, 1.0);
 }`;
+
+/**
+ * The particles, seen from the front as the wax is (the front is the far side of the box's depth),
+ * each a dot: where it was at the last post and where it is at this one, blended; its blob's colour
+ * or its warmth on a ramp; sinking toward the liquid the further back it lies. Square at a pixel or
+ * two, round above that. Colours here are as they're shown, not linear light: nothing is mixed after.
+ */
+export const DOTS_VERTEX = `#version 300 es
+precision highp float;
+layout(location = 0) in vec3 aA;
+layout(location = 1) in vec3 aB;
+layout(location = 2) in float aColour;
+layout(location = 3) in float aWarmth;
+uniform float uBlend;
+uniform vec4 uView;        // the front shown: x, y, width, height
+uniform float uDepth;      // the box's depth
+uniform float uSize;       // a dot, in pixels
+uniform float uMode;       // 0 by blob, 1 by warmth
+uniform vec3 uColours[48];
+uniform vec3 uCold;
+uniform vec3 uMid;
+uniform vec3 uHot;
+uniform vec3 uBack;
+uniform float uFog;
+out vec3 vColour;
+
+vec3 ramp(float w) {
+  // 20 to 70 degrees as 0 to 1, then on the ramp: the pool's 46 degrees and cooler cool, the
+  // crossover (50) a little short of the middle, 56 and over (fresh off the coil) hot.
+  float t = clamp((w * 50.0 + 20.0 - 46.0) / 10.0, 0.0, 1.0);
+  return t < 0.5 ? mix(uCold, uMid, t * 2.0) : mix(uMid, uHot, t * 2.0 - 1.0);
+}
+
+void main() {
+  vec3 p = mix(aA, aB, uBlend);
+  vec2 s = (p.xy - uView.xy) / uView.zw * 2.0 - 1.0;
+  float back = clamp(1.0 - p.z / uDepth, 0.0, 1.0);
+  gl_Position = vec4(s, back * 2.0 - 1.0, 1.0);
+  gl_PointSize = uSize;
+  vec3 c = uMode < 0.5 ? uColours[int(aColour + 0.5)] : ramp(aWarmth / 255.0);
+  vColour = mix(c, uBack, back * uFog);
+}`;
+
+export const DOTS_FRAGMENT = `#version 300 es
+precision highp float;
+in vec3 vColour;
+uniform float uSize;
+out vec4 outColour;
+void main() {
+  if (uSize > 2.5) {
+    vec2 d = gl_PointCoord - 0.5;
+    if (dot(d, d) > 0.25) discard;
+  }
+  outColour = vec4(vColour, 1.0);
+}`;
