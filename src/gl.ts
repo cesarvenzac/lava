@@ -9,7 +9,7 @@
  */
 
 import type { Particles } from "./loop.ts";
-import { DOTS_FRAGMENT, DOTS_VERTEX, DOWN, FILM, FOCUS, SCENE, UP, VERTEX } from "./shaders.ts";
+import { DOTS_FRAGMENT, DOTS_VERTEX, DOWN, FILM, FOCUS, SCENE, SECTION, UP, VERTEX } from "./shaders.ts";
 
 type Rgb = readonly [number, number, number];
 
@@ -51,8 +51,29 @@ export type Readiness = "waiting" | "ready" | "unavailable";
 /** The part of the lamp's front a frame shows, in its units (the lamp is 1 tall): lower left corner, width and height. */
 export type View = { x: number; y: number; width: number; height: number };
 
-/** The lamp's inside, in its units. */
+/** The lamp's inside, in its units (it's 1 tall): a tank's is its own width, 1 and its depth. */
 export const BOX: [number, number, number] = [0.4, 1, 0.4];
+export type TankSize = readonly [number, number, number];
+
+/**
+ * The tank a frame of wax is drawn in: its inside; where its coils lie across its floor (at most
+ * four) and how far their light spreads; and how it's seen: `eye` heights in front of it (0, from far
+ * off through a long lens), its wax shaded at the scale of `unit` and its depth measured in `deep`
+ * (null for both: the frame's shorter side, as the lamp's is).
+ */
+export type Stage = {
+  size: TankSize;
+  coils: readonly number[];
+  spread: number;
+  eye: number;
+  unit: number | null;
+  deep: number | null;
+  /** Where depth is measured from (the focus's 0, and where the haze starts), a share of the depth from the back. */
+  front: number;
+};
+
+/** The lamp's stage. */
+export const LAMP_STAGE: Stage = { size: BOX, coils: [0.2], spread: 0.4, eye: 0, unit: null, deep: null, front: 0.5 };
 
 export type Renderer = {
   /** Moves a waiting compile on, and says where it stands. Never waits. */
@@ -62,11 +83,15 @@ export type Renderer = {
   /** A field into slot 0 or 1: the wax's share on the lamp's grid and its warmth, as bytes. */
   upload(slot: 0 | 1, wax: Uint8Array, heat: Uint8Array, dims: [number, number, number]): void;
   /** Draws the two slots blended, 0 being slot 0 and 1 slot 1. */
-  draw(view: View, look: Look, time: number, index: number, blend: number): void;
+  draw(view: View, look: Look, time: number, index: number, blend: number, stage: Stage): void;
+  /** A section into slot 0 or 1: the cut's share of wax and its warmth, as bytes on a grid one cell deep. */
+  uploadSection(slot: 0 | 1, wax: Uint8Array, heat: Uint8Array, dims: [number, number, number]): void;
+  /** Draws the two sections blended, flat. */
+  drawSection(view: View, look: Look, blend: number, tank: TankSize): void;
   /** The particles into slot 0 or 1 (their colours and warmth are the newest's). */
   uploadDots(slot: 0 | 1, particles: Particles): void;
   /** Draws the particles of the two slots blended, each dot `size` pixels across. */
-  drawDots(view: View, look: DotsLook, blend: number, size: number): void;
+  drawDots(view: View, look: DotsLook, blend: number, size: number, tank: TankSize): void;
   destroy(): void;
 };
 
@@ -82,6 +107,7 @@ const PROGRAMS = {
   up: [VERTEX, UP],
   film: [VERTEX, FILM],
   dots: [DOTS_VERTEX, DOTS_FRAGMENT],
+  section: [VERTEX, SECTION],
 } as const;
 type Name = keyof typeof PROGRAMS;
 
@@ -120,6 +146,9 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
   let dots: { a: WebGLBuffer; b: WebGLBuffer; colour: WebGLBuffer; warmth: WebGLBuffer; vao: WebGLVertexArrayObject } | null = null;
   const heldDots: (Particles | null)[] = [null, null];
   let newestDots: 0 | 1 = 0;
+  // The sections: a 2D texture of the cut's wax and one of its warmth for each slot.
+  let sections: { wax: WebGLTexture; heat: WebGLTexture }[] = [];
+  const heldSections: ({ wax: Uint8Array; heat: Uint8Array; dims: [number, number, number] } | null)[] = [null, null];
   let dotCount = 0;
 
   function start() {
@@ -184,6 +213,7 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
     makeTargets();
     makeVolumes();
     makeDots();
+    makeSections();
     return (readiness = "ready");
   }
 
@@ -290,6 +320,34 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
     }
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
   }
+  function flat(): WebGLTexture {
+    const t = gl!.createTexture()!;
+    gl!.bindTexture(gl!.TEXTURE_2D, t);
+    gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_MIN_FILTER, gl!.LINEAR);
+    gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_MAG_FILTER, gl!.LINEAR);
+    gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_WRAP_S, gl!.CLAMP_TO_EDGE);
+    gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_WRAP_T, gl!.CLAMP_TO_EDGE);
+    gl!.texImage2D(gl!.TEXTURE_2D, 0, gl!.R8, 1, 1, 0, gl!.RED, gl!.UNSIGNED_BYTE, new Uint8Array(1));
+    return t;
+  }
+  function makeSections() {
+    if (!gl) return;
+    for (const s of sections) {
+      gl.deleteTexture(s.wax);
+      gl.deleteTexture(s.heat);
+    }
+    sections = [0, 1].map(() => ({ wax: flat(), heat: flat() }));
+    heldSections.forEach((section, slot) => section && putSection(slot as 0 | 1, section.wax, section.heat, section.dims));
+  }
+  function putSection(slot: 0 | 1, wax: Uint8Array, heat: Uint8Array, dims: [number, number, number]) {
+    if (!gl || !sections[slot]) return;
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.bindTexture(gl.TEXTURE_2D, sections[slot].wax);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, dims[0], dims[1], 0, gl.RED, gl.UNSIGNED_BYTE, wax);
+    gl.bindTexture(gl.TEXTURE_2D, sections[slot].heat);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, dims[0], dims[1], 0, gl.RED, gl.UNSIGNED_BYTE, heat);
+  }
+
   function pass(program: Program, out: Target | null, width: number, height: number) {
     gl!.bindFramebuffer(gl!.FRAMEBUFFER, out ? out.buffer : null);
     gl!.viewport(0, 0, width, height);
@@ -312,6 +370,7 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
     bloom = [];
     volumes = [];
     dots = null;
+    sections = [];
   };
   const onRestored = () => {
     start();
@@ -343,7 +402,7 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
       newestDots = slot;
       putDots(slot, particles, true);
     },
-    drawDots(view, look, blend, size) {
+    drawDots(view, look, blend, size, tank) {
       if (!gl || !programs || !dots || !dotCount || gl.isContextLost()) return;
       const { width, height } = sizes;
       const d = programs.dots, u = d.at;
@@ -357,7 +416,7 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
       gl.useProgram(d.program);
       gl.uniform1f(u.uBlend, blend);
       gl.uniform4f(u.uView, view.x, view.y, view.width, view.height);
-      gl.uniform1f(u.uDepth, BOX[2]);
+      gl.uniform1f(u.uDepth, tank[2]);
       gl.uniform1f(u.uSize, size);
       gl.uniform1f(u.uMode, look.mode === "blobs" ? 0 : 1);
       gl.uniform3fv(u.uColours, look.colours);
@@ -371,7 +430,41 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
       gl.bindVertexArray(null);
       gl.disable(gl.DEPTH_TEST);
     },
-    draw(view, look, time, index, blend) {
+    uploadSection(slot, wax, heat, dims) {
+      heldSections[slot] = { wax, heat, dims };
+      putSection(slot, wax, heat, dims);
+    },
+    drawSection(view, look, blend, tank) {
+      if (!gl || !programs || !sections.length || gl.isContextLost()) return;
+      const { width, height } = sizes;
+      const s = programs.section, u = s.at;
+      gl.bindVertexArray(vao);
+      gl.useProgram(s.program);
+      const bind = (unit: number, t: WebGLTexture, name: string) => {
+        gl.activeTexture(gl.TEXTURE0 + unit);
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.uniform1i(u[name], unit);
+      };
+      bind(0, sections[0].wax, "uWax");
+      bind(1, sections[1].wax, "uWaxB");
+      bind(2, sections[0].heat, "uHeat");
+      bind(3, sections[1].heat, "uHeatB");
+      gl.uniform1f(u.uBlend, blend);
+      gl.uniform4f(u.uView, view.x, view.y, view.width, view.height);
+      gl.uniform2f(u.uTank, tank[0], tank[1]);
+      gl.uniform2f(u.uRes, width, height);
+      gl.uniform3f(u.uWaxC, ...look.wax);
+      gl.uniform3f(u.uHot, ...look.hot);
+      gl.uniform3f(u.uLiquid, ...look.liquid);
+      gl.uniform3f(u.uLight, ...look.light);
+      gl.uniform1f(u.uGlow, look.glow);
+      gl.uniform1f(u.uHeatAmt, look.heat);
+      pass(s, null, width, height);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      gl.bindVertexArray(null);
+    },
+    draw(view, look, time, index, blend, stage) {
       if (!gl || !programs || !scene || !focused || !volumes.length || gl.isContextLost()) return;
       const { width, height, sceneWidth: sw, sceneHeight: sh } = sizes;
       gl.bindVertexArray(vao);
@@ -388,11 +481,20 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
       bind(2, volumes[0].heat, "uHeat");
       bind(3, volumes[1].heat, "uHeatB");
       gl.uniform1f(u.uBlend, blend);
-      gl.uniform3f(u.uBox, ...BOX);
+      const tank = stage.size, unit = stage.unit ?? Math.min(view.width, view.height);
+      gl.uniform3f(u.uBox, tank[0], tank[1], tank[2]);
       gl.uniform4f(u.uView, view.x, view.y, view.width, view.height);
       gl.uniform2f(u.uRes, sw, sh);
       gl.uniform1f(u.uCell, cell);
-      gl.uniform1f(u.uUnit, Math.min(view.width, view.height));
+      gl.uniform1f(u.uUnit, unit);
+      gl.uniform1f(u.uDeep, stage.deep ?? unit);
+      gl.uniform1f(u.uEye, stage.eye);
+      gl.uniform1f(u.uFront, stage.front);
+      const coils = new Float32Array(4);
+      coils.set(stage.coils.slice(0, 4));
+      gl.uniform1fv(u.uCoils, coils);
+      gl.uniform1i(u.uCoilCount, Math.min(4, stage.coils.length));
+      gl.uniform1f(u.uSpread, stage.spread);
       gl.uniform1f(u.uTime, time);
       gl.uniform3f(u.uWaxC, ...look.wax);
       gl.uniform3f(u.uHot, ...look.hot);
@@ -453,7 +555,7 @@ export function rendererFor(canvas: HTMLCanvasElement, changed: () => void): Ren
       canvas.removeEventListener("webglcontextrestored", onRestored);
       if (!gl) return;
       [scene, focused, ...bloom].forEach(release);
-      for (const v of volumes) {
+      for (const v of [...volumes, ...sections]) {
         gl.deleteTexture(v.wax);
         gl.deleteTexture(v.heat);
       }

@@ -7,24 +7,35 @@ import type { View } from "./loop.ts";
 import { type Colours, PALETTES, type PaletteName } from "./palettes.ts";
 import type { Mood } from "./sim.ts";
 
+/** The tank's shape: a lava lamp's, or the box's own. */
+export type Shape = "lamp" | "box";
+
 export type LavaOptions = {
   /** The colours it comes in: "amber" (the default), "magenta", "ember", "acid" or "violet". */
   palette?: PaletteName;
   /** Any of the palette's colours, as CSS colours (`var(--…)` included): the wax, its hot colour, the liquid and its light. */
   colours?: Partial<Colours>;
-  /** "busy" (the default): a hotter lamp, a stem often reaching the top; or "calm", one plume at a time. */
+  /** "busy" (the default): a hotter lamp, plume after plume, blobs gathering under the top; or "calm", one plume at a time. */
   mood?: Mood;
   /**
-   * What's drawn: "wax" (the default), the lamp as it looks; or the simulation itself, its particles
-   * seen from the side, "blobs" each blob in a colour of its own, "warmth" each particle by how warm
-   * it is.
+   * The tank: "lamp" (the default), a lava lamp's, two and a half times as tall as it's wide, which a
+   * box of another shape shows as much of as fits (`place`); or "box", a deep tank the box's own
+   * shape (up to 16:9; a wider box shows a band of it), seen from in front, its whole width and
+   * height shown, started again when the box's shape changes much.
+   */
+  shape?: Shape;
+  /**
+   * What's drawn: "wax" (the default), the lamp as it looks, through a lens; "section", a clean cut
+   * through its middle, flat; or the simulation itself, its particles seen from the side, "blobs" each
+   * blob in a colour of its own, "warmth" each particle by how warm it is.
    */
   view?: View;
   /** How fast it runs, 1 being a real lamp's pace; a slow device runs it slower than asked. */
   speed?: number;
   /**
-   * Which part of the lamp a box wider than it shows, 0 the pool to 1 the top; 0.5 by default. A box
-   * as tall as the lamp, two and a half times its width, or taller, shows all of it.
+   * Which part of the tank a box wider than it shows, 0 the pool to 1 the top; 0.5 by default. A box
+   * as tall as the lamp, two and a half times its width, or taller, shows all of it, as a box no wider
+   * than 16:9 shows all of a tank its own shape.
    */
   place?: number;
   /** How brightly the bulb lights the wax from below. */
@@ -37,7 +48,10 @@ export type LavaOptions = {
   exposure?: number;
   /** How shallow the focus is: 0 for everything sharp. */
   aperture?: number;
-  /** How deep the focus sits: 0 the middle, up to 0.5 nearer and -0.5 further. */
+  /**
+   * Where the focus sits, from 0.5 nearer to -0.5 further, as shares of the tank's depth: 0 is the
+   * middle of a lamp, and near the front of a box's tank, so its nearest blobs are sharp.
+   */
   focus?: number;
   /** How far the wax further back sinks into the liquid's own light. */
   haze?: number;
@@ -59,6 +73,7 @@ export type LavaOptions = {
 export const DEFAULTS = {
   palette: "amber" as PaletteName,
   mood: "busy" as Mood,
+  shape: "lamp" as Shape,
   view: "wax" as View,
   speed: 1,
   place: 0.5,
@@ -107,7 +122,8 @@ export function settle(options: LavaOptions, before?: Settings): Settings {
   }
   if (!(next.palette in PALETTES)) next.palette = DEFAULTS.palette;
   if (next.mood !== "busy" && next.mood !== "calm") next.mood = was.mood;
-  if (next.view !== "wax" && next.view !== "blobs" && next.view !== "warmth") next.view = was.view;
+  if (next.view !== "wax" && next.view !== "section" && next.view !== "blobs" && next.view !== "warmth") next.view = was.view;
+  if (next.shape !== "lamp" && next.shape !== "box") next.shape = was.shape;
   // A palette chosen replaces the colours; colours given are laid over it.
   const base = options.palette !== undefined ? PALETTES[next.palette] : was.colours;
   next.colours = { ...base, ...Object.fromEntries(Object.entries(options.colours ?? {}).filter(([, value]) => typeof value === "string" && value)) };

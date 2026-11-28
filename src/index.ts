@@ -12,6 +12,6 @@
 
 export { type Lava, lava } from "./lava.ts";
 export { type View } from "./loop.ts";
-export { type LavaOptions } from "./options.ts";
+export { type LavaOptions, type Shape } from "./options.ts";
 export { type Mood } from "./sim.ts";
 export { type Colours, PALETTE_NAMES, PALETTES, type PaletteName, standInOf } from "./palettes.ts";

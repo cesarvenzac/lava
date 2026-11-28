@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { blur, FIELD, fieldOf } from "./field.ts";
-import { lampOf, MOODS } from "./sim.ts";
+import { blur, dimsOf, FIELD, fieldOf, sectionDimsOf } from "./field.ts";
+import { lampOf, MOODS, tankOf } from "./sim.ts";
 
 describe("the field", () => {
   const lamp = lampOf(MOODS.busy);
@@ -51,5 +51,21 @@ describe("blur", () => {
     blur(point, dims, 2);
     expect(point[4 + 9 * (4 + 9 * 4)]).toBeCloseTo(1, 5);
     expect(point[6 + 9 * (6 + 9 * 6)]).toBeCloseTo(1, 5);
+  });
+});
+
+describe("a section", () => {
+  it("is the field on one layer across the middle of the depth, on cells as coarse as the tank's wax", () => {
+    const p = tankOf("busy", 16 / 9);
+    const lamp = lampOf(p, false);
+    const dims = sectionDimsOf(p);
+    expect(dims).toEqual([128, 72, 1]);
+    const { wax } = fieldOf(lamp, dims);
+    expect(wax.length).toBe(128 * 72);
+    // The pool fills the floor's cells and none at the top.
+    expect(wax[64 + 128 * 3]).toBeGreaterThan(200);
+    expect(wax[64 + 128 * 65]).toBe(0);
+    expect(dimsOf(p)).toEqual([128, 72, 22]);
+    expect(dimsOf(MOODS.busy)).toEqual(FIELD);
   });
 });

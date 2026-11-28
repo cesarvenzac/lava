@@ -7,7 +7,7 @@
  * Pure: no DOM (`unpack` needs a DecompressionStream, which browsers and Node both have).
  */
 
-import { type Lamp, lampOf, type Params } from "./sim.ts";
+import { type Lamp, lampOf, type Params, WIDEST, withRoom } from "./sim.ts";
 
 const HEADER = 12;
 const HOTTEST = 80;
@@ -24,13 +24,13 @@ export function pack(lamp: Lamp): Uint8Array {
   view.setUint32(0, n, true);
   view.setFloat32(4, lamp.time, true);
   view.setUint32(8, labels.size, true);
-  const W = lamp.params.width;
+  const W = lamp.params.width, D = lamp.params.depth;
   const u16 = (v: number) => Math.max(0, Math.min(65535, Math.round(v * 65535)));
   for (let i = 0; i < n; i++) {
     const at = HEADER + i * 10;
     view.setUint16(at, u16(lamp.x[i] / W), true);
     view.setUint16(at + 2, u16(lamp.y[i]), true);
-    view.setUint16(at + 4, u16(lamp.z[i] / W), true);
+    view.setUint16(at + 4, u16(lamp.z[i] / D), true);
     view.setUint16(at + 6, u16((lamp.t[i] - COOLEST) / (HOTTEST - COOLEST)), true);
     view.setUint16(at + 8, labels.get(lamp.body[i])!, true);
   }
@@ -45,15 +45,42 @@ export function unpackLamp(params: Params, bytes: Uint8Array): Lamp {
   if (lamp.n !== n) throw new Error(`lava: a warm start of ${n} particles for a lamp of ${lamp.n}`);
   lamp.time = view.getFloat32(4, true);
   lamp.bodies = view.getUint32(8, true);
-  const W = params.width;
+  const W = params.width, D = params.depth;
   for (let i = 0; i < n; i++) {
     const at = HEADER + i * 10;
     lamp.x[i] = (view.getUint16(at, true) / 65535) * W;
     lamp.y[i] = view.getUint16(at + 2, true) / 65535;
-    lamp.z[i] = (view.getUint16(at + 4, true) / 65535) * W;
+    lamp.z[i] = (view.getUint16(at + 4, true) / 65535) * D;
     lamp.t[i] = COOLEST + (view.getUint16(at + 6, true) / 65535) * (HOTTEST - COOLEST);
     lamp.body[i] = view.getUint16(at + 8, true);
   }
+  return lamp;
+}
+
+/**
+ * A box tank's start, cut from the widest's (packed at `WIDEST`): the particles within its width
+ * round the middle, moved over, with their blobs' labels. Its count is what falls in the cut.
+ */
+export function cutLamp(params: Params, bytes: Uint8Array): Lamp {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const stored = view.getUint32(0, true);
+  const offset = (WIDEST - params.width) / 2;
+  const keep: number[] = [];
+  for (let i = 0; i < stored; i++) {
+    const x = (view.getUint16(HEADER + i * 10, true) / 65535) * WIDEST - offset;
+    if (x >= 0 && x <= params.width) keep.push(i);
+  }
+  const lamp = withRoom(lampOf(params, false), keep.length);
+  lamp.time = view.getFloat32(4, true);
+  lamp.bodies = view.getUint32(8, true);
+  keep.forEach((i, k) => {
+    const at = HEADER + i * 10;
+    lamp.x[k] = (view.getUint16(at, true) / 65535) * WIDEST - offset;
+    lamp.y[k] = view.getUint16(at + 2, true) / 65535;
+    lamp.z[k] = (view.getUint16(at + 4, true) / 65535) * params.depth;
+    lamp.t[k] = COOLEST + (view.getUint16(at + 6, true) / 65535) * (HOTTEST - COOLEST);
+    lamp.body[k] = view.getUint16(at + 8, true);
+  });
   return lamp;
 }
 

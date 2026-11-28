@@ -9,10 +9,32 @@
  * Pure: no DOM.
  */
 
-import { type Lamp, liquidAt } from "./sim.ts";
+import { type Lamp, liquidAt, MOODS, type Params, spacingOf } from "./sim.ts";
 
 /** The field's grid over the lamp: cells a hundredth of its height. */
 export const FIELD: [number, number, number] = [40, 100, 40];
+
+/**
+ * The field's grid over a tank of any shape: cells a hundredth of the lamp's height (`FIELD`), or in
+ * a tank whose particles lie further apart, as much larger as they are, so each particle's ball spans
+ * as many cells as in the lamp and the field costs as much a particle to make and to draw.
+ */
+export function dimsOf(p: Params): [number, number, number] {
+  const cell = cellOf(p);
+  return [Math.max(2, Math.round(p.width / cell)), Math.max(2, Math.round(1 / cell)), Math.max(2, Math.round(p.depth / cell))];
+}
+
+/**
+ * A section's grid: one layer of cells across the middle of the tank's depth, so `fieldOf` on it is a
+ * clean cut through the wax there (each particle within reach of the middle counted by its distance
+ * to it, blobs apart, the warmth smoothed as it is in 3D).
+ */
+export function sectionDimsOf(p: Params): [number, number, number] {
+  const [gx, gy] = dimsOf(p);
+  return [gx, gy, 1];
+}
+
+const cellOf = (p: Params) => 0.01 * (spacingOf(p) / spacingOf(MOODS.busy));
 
 export type Field = { wax: Uint8Array; heat: Uint8Array; dims: [number, number, number] };
 
@@ -24,9 +46,9 @@ const RADIUS = 2.2;
 
 export function fieldOf(lamp: Lamp, dims: [number, number, number] = FIELD): Field {
   const [gx, gy, gz] = dims;
-  const W = lamp.params.width;
+  const W = lamp.params.width, D = lamp.params.depth;
   const size = gx * gy * gz;
-  const cell = [W / gx, 1 / gy, W / gz];
+  const cell = [W / gx, 1 / gy, D / gz];
   const r = RADIUS * lamp.spacing;
   const rx = r / cell[0], ry = r / cell[1], rz = r / cell[2];
   let w = works.get(lamp);

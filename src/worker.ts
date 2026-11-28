@@ -8,6 +8,6 @@ import { loopOf, type Message } from "./loop.ts";
 
 const scope = self as unknown as { onmessage: ((event: MessageEvent<Message>) => void) | null; postMessage(message: unknown, transfer: Transferable[]): void };
 const loop = loopOf((sent) =>
-  scope.postMessage(sent, sent.kind === "field" ? [sent.wax.buffer, sent.heat.buffer] : [sent.positions.buffer, sent.colour.buffer, sent.warmth.buffer]),
+  scope.postMessage(sent, sent.kind === "particles" ? [sent.positions.buffer, sent.colour.buffer, sent.warmth.buffer] : [sent.wax.buffer, sent.heat.buffer]),
 );
 scope.onmessage = (event) => loop.handle(event.data);

@@ -4,13 +4,12 @@
  * a few milliseconds at a time, slower but still going.
  */
 
-import { loopOf, type Message, type Sent, type View } from "./loop.ts";
+import { loopOf, type Message, type Sent, type Tank, type View } from "./loop.ts";
 import type { Mood } from "./sim.ts";
-import { WARM } from "./warm-data.ts";
 import { WORKER } from "./worker-code.ts";
 
 export type Runner = {
-  start(mood: Mood, speed: number, running: boolean, view: View): void;
+  start(mood: Mood, speed: number, running: boolean, view: View, tank: Tank): void;
   set(change: { speed?: number; running?: boolean; view?: View }): void;
   destroy(): void;
 };
@@ -22,6 +21,8 @@ export function runnerOf(receive: (sent: Sent) => void): Runner {
   let inPage: ReturnType<typeof loopOf> | null = null;
   let last: Message | null = null;
   let heard = false;
+  let asked = 0;
+  let now: { speed: number; running: boolean; view: View } = { speed: 1, running: false, view: "wax" };
 
   const inPageFallback = () => {
     worker?.terminate();
@@ -52,11 +53,28 @@ export function runnerOf(receive: (sent: Sent) => void): Runner {
   };
 
   return {
-    start(mood, speed, running, view) {
-      last = { type: "start", mood, warm: WARM[mood] ?? null, speed, running, view };
-      send(last);
+    start(mood, speed, running, view, tank) {
+      const made = ++asked;
+      now = { speed, running, view };
+      const go = (warm: string | null) => {
+        if (made !== asked) return;
+        // As things stand now: a change made while the start was loading is in `now`.
+        last = { type: "start", mood, tank, warm, ...now };
+        send(last);
+      };
+      // Each warm start is a module of its own, loaded only when a lamp starts from it.
+      const box = tank !== "lamp";
+      const warm =
+        mood === "calm"
+          ? box ? import("./warm/box-calm.ts") : import("./warm/lamp-calm.ts")
+          : box ? import("./warm/box-busy.ts") : import("./warm/lamp-busy.ts");
+      warm.then(
+        (module) => go(module.WARM),
+        () => go(null),
+      );
     },
     set(change) {
+      now = { ...now, ...change };
       if (last && last.type === "start") last = { ...last, ...change };
       send({ type: "set", ...change });
     },

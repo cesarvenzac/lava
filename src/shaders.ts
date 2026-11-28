@@ -20,10 +20,11 @@ void main() {
 
 /**
  * The scene: the wax's field (field.ts) as 3D textures, two of them blended (the last field and the
- * one before), ray-marched from the front through a long lens to where the wax's share first passes a
- * half; lit by the bulb below through the wax beneath each point, translucent where it's thin,
- * creased where wax meets wax, coloured by its warmth, with a satin skin; wax further back sinking
- * into the liquid's own light. Writes colour and depth for the depth of field.
+ * one before), ray-marched from the front to where the wax's share first passes a half: through a
+ * long lens (the lamp), or from an eye `uEye` in front of the tank, so what's nearer is larger. Lit by
+ * the coils' light below through the wax beneath each point, translucent where it's thin, creased
+ * where wax meets wax, coloured by its warmth, with a satin skin; wax further back sinking into the
+ * liquid's own light. Writes colour and depth for the depth of field.
  */
 export const SCENE = `#version 300 es
 precision highp float;
@@ -37,7 +38,13 @@ uniform vec3 uBox;        // the lamp's inside, metres
 uniform vec4 uView;       // the front shown: x, y, width, height
 uniform vec2 uRes;
 uniform float uCell;
-uniform float uUnit;      // the frame's shorter side, metres: depth is measured in it
+uniform float uUnit;      // the scale the wax is shaded at (the lamp's: the frame's shorter side)
+uniform float uDeep;      // what depth is measured in, for the haze and the focus
+uniform float uFront;     // and from where, as a share of the tank's depth from its back
+uniform float uEye;       // how far in front of the tank the eye is; 0, from far off through a long lens
+uniform float uCoils[4];  // where the coils lie across the floor, and how far their light spreads
+uniform int uCoilCount;
+uniform float uSpread;
 uniform vec3 uWaxC;
 uniform vec3 uHot;
 uniform vec3 uLiquid;
@@ -51,15 +58,31 @@ out vec4 outScene;
 
 const float FAR = -4.0;
 
-float waxAt(vec3 p) { vec3 t = p / uBox; return mix(texture(uWax, t).r, texture(uWaxB, t).r, uBlend); }
+// The wax's share at a point; drawn off the front and back glass within a few cells, so wax pressed
+// against the glass shows rounded rather than as a flat patch whose normal is the field's edge.
+float waxAt(vec3 p) {
+  vec3 t = p / uBox;
+  float glass = smoothstep(0.0, 3.0 * uCell, p.z) * smoothstep(0.0, 3.0 * uCell, uBox.z - p.z);
+  return mix(texture(uWax, t).r, texture(uWaxB, t).r, uBlend) * glass;
+}
 float heatAt(vec3 p) { vec3 t = p / uBox; return 20.0 + 50.0 * mix(texture(uHeat, t).r, texture(uHeatB, t).r, uBlend); }
 
+// How near the coils a point lies across the floor: 1 over one, falling off away from it.
+float overCoils(float x) {
+  float most = 0.0;
+  for (int i = 0; i < 4; i++) {
+    if (i >= uCoilCount) break;
+    float mid = (x - uCoils[i]) / uSpread;
+    most = max(most, exp(-mid * mid * 6.0));
+  }
+  return most;
+}
+
 vec3 liquid(vec2 q) {
-  // The bulb's light rising through the liquid from the floor, strongest in the middle.
+  // The coils' light rising through the liquid from the floor, strongest over them.
   float up = clamp(q.y / uBox.y, 0.0, 1.0);
   float rise = exp(-up * up * 3.0);
-  float mid = (q.x - 0.5 * uBox.x) / uBox.x;
-  vec3 c = uLiquid + uLight * rise * (0.55 + 0.45 * exp(-mid * mid * 6.0)) * 0.85;
+  vec3 c = uLiquid + uLight * rise * (0.55 + 0.45 * overCoils(q.x)) * 0.85;
   return c;
 }
 
@@ -69,11 +92,11 @@ vec3 normalAt(vec3 p) {
   return -normalize(g + 1e-6);
 }
 
-vec3 shade(vec3 p) {
+vec3 shade(vec3 p, vec3 V) {
   vec3 N = normalAt(p);
-  float ndv = clamp(N.z, 0.0, 1.0);
+  float ndv = clamp(dot(N, -V), 0.0, 1.0);
   float up = p.y / uBox.y;
-  float bulb = exp(-clamp(up, 0.0, 1.5) * 2.2) * (0.78 + 0.22 * exp(-pow((p.x - 0.5 * uBox.x) / uBox.x, 2.0) * 6.0));
+  float bulb = exp(-clamp(up, 0.0, 1.5) * 2.2) * (0.78 + 0.22 * overCoils(p.x));
   // The wax between this point and the bulb, and behind it from the eye: a few samples each, set
   // off by a share of a step at each pixel so their steps become a noise the grain hides.
   float jit = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
@@ -82,7 +105,7 @@ vec3 shade(vec3 p) {
   for (int i = 0; i < 4; i++) {
     float k = float(i) + 0.5 + jit;
     below += waxAt(p - vec3(0.0, k * down, 0.0));
-    seen += waxAt(p - vec3(0.0, 0.0, k * back));
+    seen += waxAt(p + V * (k * back / -V.z));
   }
   float E = bulb * exp(-below * 0.36);
   float thin = exp(-seen * 0.45);
@@ -99,15 +122,19 @@ vec3 shade(vec3 p) {
   float hot = smoothstep(50.0, 57.0, T) * uHeatAmt;
   float cold = smoothstep(48.0, 40.0, T) * uHeatAmt;
   vec3 deep = uWaxC * uWaxC * 0.85;
-  vec3 body = mix(deep, uWaxC, clamp(E * 1.5 + 0.15, 0.0, 1.0));
-  body = mix(body, uHot, clamp(E * (0.75 * thin + 0.7 * pow(1.0 - ndv, 2.0)) + 0.12 * E, 0.0, 1.0));
+  // The light the wax round it scatters through it fills it, less shadowed than what reaches the skin.
+  float fill = bulb * exp(-below * 0.18);
+  // Its thin edges glow where the light comes up through them: below and at the sides, not on top.
+  float rim = 0.3 + 0.7 * facing;
+  vec3 body = mix(deep, uWaxC, clamp(fill * 1.6 + 0.2, 0.0, 1.0));
+  body = mix(body, uHot, clamp(E * (0.35 * thin + 0.7 * pow(1.0 - ndv, 2.0)) * rim + 0.25 * fill, 0.0, 1.0));
   body = mix(body, uHot, 0.3 * hot);
   body *= 1.0 - 0.35 * cold;
-  vec3 c = body * (0.07 + E * (0.45 + 1.9 * facing) * 2.3 * uGlow) * ao;
+  vec3 c = body * (0.07 + mix(E, fill, 0.5) * (0.45 + 1.9 * facing) * 2.3 * uGlow) * ao;
   c += uHot * hot * hot * (0.12 + 0.2 * thin) * (0.5 + E) * ao;
   c += body * uLight * 0.45 * ao;
-  c += uLight * pow(1.0 - ndv, 3.0) * 0.3 * ao;
-  vec3 R = reflect(vec3(0.0, 0.0, -1.0), N);
+  c += uLight * pow(1.0 - ndv, 3.0) * 0.3 * rim * ao;
+  vec3 R = reflect(V, N);
   float fres = 0.04 + 0.96 * pow(1.0 - ndv, 5.0);
   c += uLight * (0.4 * clamp(-R.y, 0.0, 1.0) + 0.06) * fres * uGloss * ao;
   return c;
@@ -117,17 +144,26 @@ void main() {
   vec2 q = uView.xy + gl_FragCoord.xy / uRes * uView.zw;
   vec3 back = liquid(q);
   if (q.x < 0.0 || q.x > uBox.x || q.y < 0.0 || q.y > uBox.y) { outScene = vec4(back, FAR); return; }
-  // March from the front, half a cell at a time, to where the wax share first passes a half.
+  // The ray: from the front, at q, on into the tank, moving out from the middle of the view by out_ for
+  // each unit of depth (none through a long lens).
+  vec2 out_ = uEye > 0.0 ? (q - (uView.xy + 0.5 * uView.zw)) / uEye : vec2(0.0);
+  vec3 V = normalize(vec3(out_, -1.0));
+  // March from the front, half a cell of depth at a time, to where the wax share first passes a half,
+  // or the ray leaves the tank through a side: what's behind is the liquid where it leaves, the
+  // floor's light where it leaves through the floor.
   float step_ = 0.5 * uCell;
   float z = uBox.z - 0.5 * uCell;
-  float prev = waxAt(vec3(q, z));
+  vec2 xy = q + out_ * (uBox.z - z);
+  float prev = waxAt(vec3(xy, z));
   float most = prev;
   bool hit = prev >= 0.5;
   float zh = z;
   for (int i = 0; i < 400; i++) {
     if (hit || z < 0.5 * uCell) break;
     float zn = z - step_;
-    float now = waxAt(vec3(q, zn));
+    xy = q + out_ * (uBox.z - zn);
+    if (xy.x < 0.0 || xy.x > uBox.x || xy.y < 0.0 || xy.y > uBox.y) { back = liquid(clamp(xy, vec2(0.0), uBox.xy)); break; }
+    float now = waxAt(vec3(xy, zn));
     most = max(most, now);
     if (now >= 0.5) { zh = zn + step_ * (now - 0.5) / max(now - prev, 1e-4); hit = true; break; }
     prev = now;
@@ -140,12 +176,17 @@ void main() {
     // Find where it came nearest, and shade there.
     zh = uBox.z;
     float best = -1.0;
-    for (float t = uBox.z - 0.5 * uCell; t > 0.0; t -= uCell) { float v = waxAt(vec3(q, t)); if (v > best) { best = v; zh = t; } }
+    for (float t = uBox.z - 0.5 * uCell; t > 0.0; t -= uCell) {
+      vec2 at = q + out_ * (uBox.z - t);
+      if (at.x < 0.0 || at.x > uBox.x || at.y < 0.0 || at.y > uBox.y) break;
+      float v = waxAt(vec3(at, t));
+      if (v > best) { best = v; zh = t; }
+    }
   }
-  vec3 p = vec3(q, zh);
-  vec3 c = shade(p);
+  vec3 p = vec3(q + out_ * (uBox.z - zh), zh);
+  vec3 c = shade(p, V);
   // Wax further back sinks into the liquid's own light.
-  float depth = (p.z - 0.5 * uBox.z) / uUnit;
+  float depth = (p.z - uFront * uBox.z) / uDeep;
   c = mix(back, c, exp(-max(-depth, 0.0) * 2.2 * uHaze));
   outScene = vec4(mix(back, c, cover), cover > 0.5 ? depth : FAR);
 }`;
@@ -316,4 +357,49 @@ void main() {
     if (dot(d, d) > 0.25) discard;
   }
   outColour = vec4(vColour, 1.0);
+}`;
+
+/**
+ * A section: the cut through the tank's middle (field.ts on a grid one cell deep), two of them
+ * blended, drawn flat. Wax where the cut's share passes a half, its edge smoothed over a pixel; its
+ * colour leaning toward the hot one as it warms, a little brighter near the bulb; the liquid round
+ * it lit from the floor. No lens, no bloom, no grain: what's there, cleanly. Written out as sRGB.
+ */
+export const SECTION = `#version 300 es
+precision highp float;
+uniform sampler2D uWax;
+uniform sampler2D uWaxB;
+uniform sampler2D uHeat;
+uniform sampler2D uHeatB;
+uniform float uBlend;
+uniform vec4 uView;     // the front shown: x, y, width, height
+uniform vec2 uTank;     // the tank's width and height
+uniform vec2 uRes;
+uniform vec3 uWaxC;
+uniform vec3 uHot;
+uniform vec3 uLiquid;
+uniform vec3 uLight;
+uniform float uGlow;
+uniform float uHeatAmt;
+out vec4 outColour;
+
+vec3 encode(vec3 c) {
+  c = max(c, 0.0);
+  return mix(12.92 * c, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+}
+
+void main() {
+  vec2 q = uView.xy + gl_FragCoord.xy / uRes * uView.zw;
+  vec2 uv = q / uTank;
+  // The liquid, lit from the floor by the bulb.
+  vec3 liquid = uLiquid + uLight * (0.75 * uGlow) * exp(-2.4 * q.y);
+  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { outColour = vec4(encode(liquid), 1.0); return; }
+  float share = mix(texture(uWax, uv).r, texture(uWaxB, uv).r, uBlend);
+  float warmth = mix(texture(uHeat, uv).r, texture(uHeatB, uv).r, uBlend) * 50.0 + 20.0;
+  // Cool wax is the wax's colour; past the crossover it leans toward the hot one, fresh off a coil most.
+  float hot = clamp((warmth - 47.0) / 11.0, 0.0, 1.0) * uHeatAmt;
+  vec3 wax = mix(uWaxC, uHot, 0.8 * hot) * (0.85 + 0.45 * uGlow * exp(-2.0 * q.y));
+  float edge = max(fwidth(share), 1e-3);
+  float inside = smoothstep(0.5 - edge, 0.5 + edge, share);
+  outColour = vec4(encode(mix(liquid, wax, inside)), 1.0);
 }`;

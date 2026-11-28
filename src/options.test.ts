@@ -68,3 +68,12 @@ describe("the view", () => {
     expect(settle({ view: "x-ray" as never }, settle({ view: "blobs" })).view).toBe("blobs");
   });
 });
+
+describe("the tank's shape", () => {
+  it("is the lamp's unless a box's is asked for, and section is a view", () => {
+    expect(settle({}).shape).toBe("lamp");
+    expect(settle({ shape: "box" }).shape).toBe("box");
+    expect(settle({ shape: "barrel" as never }, settle({ shape: "box" })).shape).toBe("box");
+    expect(settle({ view: "section" }).view).toBe("section");
+  });
+});

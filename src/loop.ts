@@ -1,20 +1,27 @@
 /**
  * The lamp kept running: steps taken as real time passes (times `speed`), never more than a few at
  * once, so a slow machine runs the lamp slower rather than stutter; and every `EVERY` seconds of the
- * lamp's own time, what's drawn of it (its wax as a field, or its particles as they are), handed on
+ * lamp's own time, what's drawn of it (its wax as a field, a cut through its middle, or its particles
+ * as they are), handed on
  * with the lamp's time and how many of its seconds passed in each real one lately. Run in a worker
  * (worker.ts), or in the page where workers are refused (runner.ts).
  */
 
-import { type Field, fieldOf } from "./field.ts";
-import { type Lamp, lampOf, MOODS, type Mood, step } from "./sim.ts";
-import { unpackLamp, unzip } from "./warm.ts";
+import { dimsOf, type Field, fieldOf, sectionDimsOf } from "./field.ts";
+import { type Lamp, lampOf, type Mood, step, tankOf } from "./sim.ts";
+import { cutLamp, unpackLamp, unzip } from "./warm.ts";
 
 /** How often what's drawn is sent, in the lamp's seconds. */
 export const EVERY = 1 / 20;
 
-/** What a lamp is drawn as: its wax, or its particles, each blob in a colour of its own or each particle by its warmth. */
-export type View = "wax" | "blobs" | "warmth";
+/**
+ * What a lamp is drawn as: its wax; a clean cut through its middle; or its particles, each blob in a
+ * colour of its own or each particle by its warmth.
+ */
+export type View = "wax" | "section" | "blobs" | "warmth";
+
+/** The tank: the lamp's own, or a box's, this many times as wide as it's tall. */
+export type Tank = "lamp" | { aspect: number };
 
 /** How many colours the blobs are drawn in: the pool's, then one for each blob in turn. */
 export const BLOB_COLOURS = 48;
@@ -26,10 +33,16 @@ export const BLOB_COLOURS = 48;
  */
 export type Particles = { positions: Float32Array; colour: Uint8Array; warmth: Uint8Array };
 
-export type Start = { type: "start"; mood: Mood; warm: string | null; speed: number; running: boolean; view: View };
+export type Start = { type: "start"; mood: Mood; tank: Tank; warm: string | null; speed: number; running: boolean; view: View };
 export type Change = { type: "set"; speed?: number; running?: boolean; view?: View };
 export type Message = Start | Change;
-export type Sent = ({ kind: "field" } & Field | { kind: "particles" } & Particles) & { time: number; rate: number };
+export type Sent = (({ kind: "field" } & Field) | ({ kind: "section" } & Field) | ({ kind: "particles" } & Particles)) & { time: number; rate: number };
+
+/** What a view is sent as. */
+export const kindOf = (view: View): Sent["kind"] => (view === "wax" ? "field" : view === "section" ? "section" : "particles");
+
+/** A tank's params. */
+export const paramsOf = (mood: Mood, tank: Tank) => tankOf(mood, tank === "lamp" ? "lamp" : tank.aspect);
 
 /** The particles of a lamp, to be drawn. */
 export function particlesOf(lamp: Lamp): Particles {
@@ -78,7 +91,10 @@ export function loopOf(send: (sent: Sent) => void, budget = 30): Loop {
     while (recent.length > 2 && now - recent[0][0] > 3000) recent.shift();
     const [t0, s0] = recent[0];
     const said = { time: lamp.time, rate: now > t0 ? ((lamp.time - s0) * 1000) / (now - t0) : speed };
-    send(view === "wax" ? { kind: "field", ...fieldOf(lamp), ...said } : { kind: "particles", ...particlesOf(lamp), ...said });
+    const kind = kindOf(view);
+    if (kind === "particles") send({ kind, ...particlesOf(lamp), ...said });
+    else if (kind === "section") send({ kind, ...fieldOf(lamp, sectionDimsOf(lamp.params)), ...said });
+    else send({ kind, ...fieldOf(lamp, dimsOf(lamp.params)), ...said });
   };
 
   const turn = () => {
@@ -113,7 +129,8 @@ export function loopOf(send: (sent: Sent) => void, budget = 30): Loop {
         speed = message.speed;
         running = message.running;
         view = message.view;
-        const params = MOODS[message.mood] ?? MOODS.busy;
+        const params = paramsOf(message.mood, message.tank);
+        const fromWarm = (bytes: Uint8Array) => (message.tank === "lamp" ? unpackLamp(params, bytes) : cutLamp(params, bytes));
         const begin = (made2: Lamp) => {
           if (made !== generation || stopped) return;
           lamp = made2;
@@ -125,7 +142,7 @@ export function loopOf(send: (sent: Sent) => void, budget = 30): Loop {
           if (running) schedule(0);
         };
         // A warm start, or (where it can't be read) a cold pool, which takes some minutes to warm.
-        if (message.warm) unzip(message.warm).then((bytes) => begin(unpackLamp(params, bytes)), () => begin(lampOf(params)));
+        if (message.warm) unzip(message.warm).then((bytes) => begin(fromWarm(bytes)), () => begin(lampOf(params)));
         else begin(lampOf(params));
         return;
       }

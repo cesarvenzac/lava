@@ -22,12 +22,12 @@
  */
 
 import { dotColoursOf } from "./dots.ts";
-import { BOX, type DotsLook, type Look, type Readiness, rendererFor, type View } from "./gl.ts";
-import type { Sent } from "./loop.ts";
+import { BOX, type DotsLook, LAMP_STAGE, type Look, type Readiness, rendererFor, type Stage, type TankSize, type View } from "./gl.ts";
+import { kindOf, paramsOf, type Sent, type Tank } from "./loop.ts";
 import { type LavaOptions, type Settings, settle } from "./options.ts";
 import { standInOf, toLinear } from "./palettes.ts";
 import { runnerOf } from "./runner.ts";
-import { MOODS, spacingOf } from "./sim.ts";
+import { MOODS, type Params, spacingOf } from "./sim.ts";
 
 export type Lava = {
   /** The element it's drawn in. */
@@ -109,16 +109,40 @@ const SLOW = 50;
 const LOWER = 0.78;
 const LOWEST = 2;
 
-/** What a box of this shape shows of the lamp: all its width, and as much of its height as fits, at `place`. */
-export function viewOf(aspect: number, place: number): View {
-  const lamp = BOX[0] / BOX[1];
-  if (aspect >= lamp) {
-    const height = BOX[0] / aspect;
-    return { x: 0, y: place * (BOX[1] - height), width: BOX[0], height };
+/**
+ * What a box of this shape shows of a tank (the lamp's, unless another is given): all its width, and
+ * as much of its height as fits, at `place`; or, for a box narrower than the tank, all its height and
+ * the middle of its width.
+ */
+export function viewOf(aspect: number, place: number, tank: TankSize = BOX): View {
+  const shape = tank[0] / tank[1];
+  if (aspect >= shape) {
+    const height = tank[0] / aspect;
+    return { x: 0, y: place * (tank[1] - height), width: tank[0], height };
   }
-  const width = aspect * BOX[1];
-  return { x: (BOX[0] - width) / 2, y: 0, width, height: BOX[1] };
+  const width = aspect * tank[1];
+  return { x: (tank[0] - width) / 2, y: 0, width, height: tank[1] };
 }
+
+/** How far in front of a box's tank the eye is, in heights: near enough that nearer wax is larger. */
+const EYE = 2.2;
+/** Where a box's focus falls (and its haze starts), as a share of its depth from the back: near the front. */
+const FRONT = 0.8;
+
+/**
+ * How a tank is drawn: the lamp as it always was, through a long lens; a box's from `EYE` in front,
+ * its depth measured over its own (so its focus and haze reach front to back as the lamp's do), its
+ * wax shaded and its coils' light spread at the scale of its blobs (larger than the lamp's, as its
+ * particles are further apart).
+ */
+export function stageOf(p: Params, lamp: boolean): Stage {
+  if (lamp) return LAMP_STAGE;
+  const scale = spacingOf(p) / SPACING;
+  return { size: [p.width, 1, p.depth], coils: p.coils, spread: 0.4 * scale, eye: EYE, unit: 0.4 * scale, deep: p.depth, front: FRONT };
+}
+
+/** How far a box's shape may stray from its tank's (a share either way) before a tank its new shape is started. */
+const RESHAPE = 0.1;
 
 export function lava(element: HTMLElement, options: LavaOptions = {}): Lava {
   let settings = settle(options);
@@ -200,17 +224,34 @@ export function lava(element: HTMLElement, options: LavaOptions = {}): Lava {
   const still = () => settings.reducedMotion ?? reduce?.matches ?? false;
   const moving = () => !destroyed && onScreen && !document.hidden && !settings.paused && !still();
 
-  // What's drawn as it comes (fields of wax, or the particles): each into the slot the one before
-  // isn't in, the picture moving toward it over the time it took to come. Counted afresh when the
-  // view changes, since what came before was the other kind.
+  // The tank: the lamp's own, or (`shape: "box"`) one the box's shape, as the box first measures.
+  const tankFor = (): Tank => {
+    if (settings.shape !== "box") return "lamp";
+    const rect = element.getBoundingClientRect();
+    return { aspect: rect.width > 0 && rect.height > 0 ? rect.width / rect.height : 16 / 9 };
+  };
+  let tank = tankFor();
+  let spacing = SPACING;
+  const stageFor = (of: Tank) => {
+    const p = paramsOf(settings.mood, of);
+    spacing = spacingOf(p);
+    return stageOf(p, of === "lamp");
+  };
+  let stage = stageFor(tank);
+
+  // What's drawn as it comes (fields of wax, sections, or the particles): each into the slot the one
+  // before isn't in, the picture moving toward it over the time it took to come. Counted afresh when
+  // the view or the tank changes, since what came before was another kind or another tank.
   let fields = 0, newest: 0 | 1 = 1, arrived = 0, gap = 1 / 20;
-  const kindOf = () => (settings.view === "wax" ? "field" : "particles");
   const runner = runnerOf((sent: Sent) => {
-    if (destroyed || sent.kind !== kindOf()) return;
+    if (destroyed || sent.kind !== kindOf(settings.view)) return;
     const slot: 0 | 1 = newest === 0 ? 1 : 0;
     if (sent.kind === "field") {
       renderer.upload(slot, sent.wax, sent.heat, sent.dims);
       if (!fields) renderer.upload(newest, sent.wax, sent.heat, sent.dims);
+    } else if (sent.kind === "section") {
+      renderer.uploadSection(slot, sent.wax, sent.heat, sent.dims);
+      if (!fields) renderer.uploadSection(newest, sent.wax, sent.heat, sent.dims);
     } else {
       if (!fields) renderer.uploadDots(newest, sent);
       renderer.uploadDots(slot, sent);
@@ -225,7 +266,27 @@ export function lava(element: HTMLElement, options: LavaOptions = {}): Lava {
     request();
   });
   let running = moving();
-  runner.start(settings.mood, settings.speed, running, settings.view);
+  const begin = () => {
+    fields = 0;
+    running = moving();
+    runner.start(settings.mood, settings.speed, running, settings.view, tank);
+  };
+  begin();
+  // A box's tank follows its shape: once it's settled at a shape far enough from its tank's, a tank
+  // that shape is started, from its own warm start.
+  let reshaping = 0;
+  const reshape = () => {
+    if (settings.shape !== "box" || tank === "lamp") return;
+    const next = tankFor();
+    if (next === "lamp" || Math.abs(Math.log(next.aspect / tank.aspect)) < Math.log(1 + RESHAPE)) return;
+    clearTimeout(reshaping);
+    reshaping = window.setTimeout(() => {
+      if (destroyed) return;
+      tank = tankFor();
+      stage = stageFor(tank);
+      begin();
+    }, 400);
+  };
   const follow = () => {
     const now = moving();
     if (now !== running) {
@@ -246,10 +307,11 @@ export function lava(element: HTMLElement, options: LavaOptions = {}): Lava {
   function draw(readiness: Readiness, now: number) {
     if (readiness !== "ready" || !size.width || !fields) return false;
     const toward = Math.min(1, (now - arrived) / 1000 / gap);
-    const view = viewOf(size.width / size.height, settings.place);
+    const view = viewOf(size.width / size.height, settings.place, stage.size);
     const blend = newest === 1 ? toward : 1 - toward;
-    if (settings.view === "wax") renderer.draw(view, look, now / 1000, frames, blend);
-    else renderer.drawDots(view, dotsLook, blend, Math.max(1, DOT * SPACING * (size.height / view.height)));
+    if (settings.view === "wax") renderer.draw(view, look, now / 1000, frames, blend, stage);
+    else if (settings.view === "section") renderer.drawSection(view, look, blend, stage.size);
+    else renderer.drawDots(view, dotsLook, blend, Math.max(1, DOT * spacing * (size.height / view.height)), stage.size);
     if (wanted.length) answer(() => createImageBitmap(canvas));
     if (!shown) {
       shown = true;
@@ -303,7 +365,10 @@ export function lava(element: HTMLElement, options: LavaOptions = {}): Lava {
     if (!raf && !destroyed) raf = requestAnimationFrame(tick);
   }
 
-  const resized = new ResizeObserver(() => resize());
+  const resized = new ResizeObserver(() => {
+    resize();
+    reshape();
+  });
   resized.observe(element);
   const seen = typeof IntersectionObserver === "function"
     ? new IntersectionObserver((entries) => {
@@ -327,10 +392,13 @@ export function lava(element: HTMLElement, options: LavaOptions = {}): Lava {
     if (labelled && settings.label !== before.label) element.setAttribute("aria-label", settings.label);
     if (settings.maxPixels !== before.maxPixels) resize(true);
     if (settings.view !== before.view) fields = 0;
-    if (settings.mood !== before.mood) {
-      // Another lamp: started from its own warm start.
-      running = moving();
-      runner.start(settings.mood, settings.speed, running, settings.view);
+    if (settings.shape !== before.shape) {
+      tank = tankFor();
+      stage = stageFor(tank);
+    }
+    if (settings.mood !== before.mood || settings.shape !== before.shape) {
+      // Another lamp, or another tank: started from its own warm start.
+      begin();
     } else {
       if (settings.speed !== before.speed) runner.set({ speed: settings.speed });
       if (settings.view !== before.view) runner.set({ view: settings.view });
@@ -362,6 +430,7 @@ export function lava(element: HTMLElement, options: LavaOptions = {}): Lava {
     destroy() {
       if (destroyed) return;
       destroyed = true;
+      clearTimeout(reshaping);
       answer(null);
       if (raf) cancelAnimationFrame(raf);
       resized.disconnect();

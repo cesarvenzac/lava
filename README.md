@@ -8,6 +8,8 @@ wax rises, sinks and drifts at a real lamp's speeds. Drawn glowing in a dark liq
 long lens with a shallow focus, its light blooming, then graded as film. WebGL 2 and a worker, with
 no dependencies.
 
+[![A wide tank of amber wax glowing in a plum liquid, seen from in front: plumes rising off three coils across the floor, blobs passing in front of and behind each other on their way up and down, the nearest sharp and those behind soft](https://cesarvenzac.com/media/aab6eff6-56cb-4501-a8b6-b7229debc3a1.webp)](https://cesarvenzac.com/lava)
+
 The docs, with live examples, are at [cesarvenzac.com/lava](https://cesarvenzac.com/lava).
 
 ```sh
@@ -33,22 +35,29 @@ import { Lava } from "@cesarvenzac/lava/react";
 The element is the lamp: give it a size, and the wax fills it, laid under the element's own
 content. The lamp is two and a half times as tall as it's wide: a box that shape or taller shows
 all of it; a wider one shows a band of it, as a picture fills a box with `object-fit: cover`, and
-`place` chooses which, from the pool (0) to the top (1). A lamp on its own is a picture, named by
-`label`; with content inside, it's that content's background and says nothing itself.
+`place` chooses which, from the pool (0) to the top (1). Or, with `shape="box"`, the tank is the
+box's own shape, deep, seen from in front, all of it shown (up to 16:9; a wider box shows a band):
+
+```tsx
+<Lava shape="box" style={{ aspectRatio: "16 / 9" }} />;
+```
+
+A lamp on its own is a picture, named by `label`; with content inside, it's that content's
+background and says nothing itself.
 
 ## What it does
 
 - **Simulated wax.** Each particle has its own temperature. Wax is a little heavier than the liquid
   when cool and a little lighter when warm, and lifts in proportion. Its skin has surface tension,
-  so blobs round off and a stretched neck thins and breaks. Blobs that meet press together, dented
+  so blobs round off and a stretched neck thins; one thinned to a thread parts within a second, its
+  middle going off as beads. Blobs that meet press together, dented
   flat where they touch, and slide past each other; only after half a minute pressed together, as
   the liquid between real blobs takes to drain, do they run into one. Heat spreads slowly through
   the wax, as it does in real wax.
-- **Two lamps.** `mood`: `busy` (the default), a hotter lamp, a stem often reaching the top and
-  feeding what gathers there; or `calm`, one plume at a time. Each starts from a lamp already
-  running, so there's no waiting for it to warm up. (One thing isn't a real lamp's: the coil's heat
-  swells and fades over a minute or so. Held steady, the simulation settles after a minute or two
-  into a column standing over the coil.)
+- **Two lamps.** `mood`: `busy` (the default), a hotter lamp, plume after plume, a crowd of blobs
+  gathering under the top; or `calm`, one plume at a time. Each starts from a lamp already
+  running, so there's no waiting for it to warm up. The coil heats steadily, as a bulb does: what
+  comes and goes is the wax's own doing.
 - **In a worker.** The simulation runs off the page, started from its own source, so nothing has to
   be set up to load it; where a page's security policy refuses that, it runs in the page a few
   milliseconds at a time. It runs at the lamp's own pace (`speed`), or as near as the device allows:
@@ -60,8 +69,14 @@ all of it; a wider one shows a band of it, as a picture fills a box with `object
 - **A lens.** Wax in front of and behind the focus blurs, as a macro lens draws it (`aperture`,
   `focus`); wax further back sinks into the liquid's own light (`haze`). The brightest light
   blooms, and the picture goes through a filmic tone curve, a vignette and a fine grain.
-- **Inside it.** `view`: `wax` (the default), the lamp as it looks; or the simulation itself, its
-  particles seen from the side, `blobs` each blob in a colour of its own (the pool in a muted tone
+- **Any shape.** `shape`: `lamp` (the default), a tall lamp, which a box of another shape shows as
+  much of as fits (`place`); or `box`, a tank the box's own shape, as wide as the box (up to 16:9)
+  and three tenths as deep as it's tall, a coil every so often across its floor and the pool lying
+  as one layer over it, seen from in front, so the wax nearer you is larger. Its wax is a little
+  coarser than the lamp's, so a 16:9 tank's ten thousand particles keep up on a phone. Its warm
+  start is loaded only when a box asks for one.
+- **Inside it.** `view`: `wax` (the default), the lamp as it looks, through a lens; `section`, a clean
+  cut through its middle, flat; or the simulation itself, its particles seen from the side, `blobs` each blob in a colour of its own (the pool in a muted tone
   of the bulb's light), `warmth` each particle by how warm it is, cool in blue and fresh off the
   coil in the wax's hot colour. `snapshot()` hands back a picture of the next frame drawn, in any
   view, paused or not.
@@ -92,8 +107,8 @@ type Lava = {
 };
 ```
 
-`LavaOptions`, each with its default: `palette` (`"amber"`), `colours`, `mood` (`"busy"`), `view`
-(`"wax"`), `speed`
+`LavaOptions`, each with its default: `palette` (`"amber"`), `colours`, `mood` (`"busy"`), `shape`
+(`"lamp"`), `view` (`"wax"`), `speed`
 (1), `place` (0.5), `glow` (1), `bloom` (1), `gloss` (1), `exposure` (1), `aperture` (1), `focus`
 (0), `haze` (1), `heat` (1), `grain` (1), `label`, `reducedMotion` (the system's), `maxPixels`
 (800,000), `paused` (false).
